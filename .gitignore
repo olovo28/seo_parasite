@@ -1,0 +1,27 @@
+node_modules/
+.env
+
+# Локальная БД (better-sqlite3) и её WAL-файлы
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+data/
+
+# Скриншоты ошибок публикации/логина
+screenshots/
+*-failed.png
+
+diagnostics/
+
+# Расширение YesCaptcha с вшитым API-ключом (секрет) — не коммитим
+reference/google_pro_1.4.3/
+reference/google_pro_1.4.3*.zip
+
+# Куки-сессии (секрет) и диагностические дампы
+diagnostics-*.json
+reference/cookies/
+
+# Чужой файл от другого проекта (Crypto Monitor) — попал случайно
+CLAUDE_test.md

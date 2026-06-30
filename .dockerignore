@@ -1,0 +1,12 @@
+node_modules
+data
+screenshots
+.env
+.git
+.idea
+reference
+*.page
+*-failed.png
+npm-debug.log
+
+diagnostics

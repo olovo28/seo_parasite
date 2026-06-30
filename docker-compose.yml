@@ -1,0 +1,63 @@
+# Один образ, несколько независимых сервисов. Все делят том appdata (SQLite).
+# Dolphin{anty} работает на ХОСТЕ (Windows) — контейнеры ходят к нему через host.docker.internal.
+#
+#   docker compose up -d web scheduler           # поднять веб + планировщик
+#   docker compose run --rm generator node cli/generate.js --site 1 --category news
+#   docker compose run --rm app node cli/sites.js list   # любая CLI-команда
+
+services:
+  web:
+    build: .
+    image: austria-automation
+    command: node web/server.js
+    env_file: .env
+    environment:
+      DB_PATH: /data/app.db
+      PORT: "3000"
+      DOLPHIN_HOST: host.docker.internal   # кнопка «Опубликовать/Удалить» в вебе тоже ходит к Dolphin на хосте
+      CLAUDE_CLI_URL: http://host.docker.internal:3737   # генерация «в рамках тарифа» — через хостовый мост (npm run claude-bridge)
+    ports:
+      - "3000:3000"
+    volumes:
+      - appdata:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:3000/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  scheduler:
+    build: .
+    image: austria-automation
+    command: node scheduler.js
+    env_file: .env
+    environment:
+      DB_PATH: /data/app.db
+      DOLPHIN_HOST: host.docker.internal   # Dolphin Local API + браузер на хосте
+    volumes:
+      - appdata:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  # Разовые задачи (генерация, CLI). Не стартует автоматически: профиль "manual".
+  generator:
+    build: .
+    image: austria-automation
+    profiles: ["manual"]
+    env_file: .env
+    environment:
+      DB_PATH: /data/app.db
+      DOLPHIN_HOST: host.docker.internal
+      CLAUDE_CLI_URL: http://host.docker.internal:3737
+    volumes:
+      - appdata:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  appdata:
