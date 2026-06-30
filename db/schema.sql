@@ -261,11 +261,22 @@ CREATE TABLE IF NOT EXISTS proxies (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
   url              TEXT    NOT NULL UNIQUE,   -- строка прокси (parseProxy): scheme://user:pass@host:port
   country          TEXT    NOT NULL DEFAULT 'at', -- страна пула (at/de/ch/…) — выдаётся под страну почты
+  group_id         INTEGER,                    -- именованная группа прокси (proxy_groups) с назначением по видам работы
   last_assigned_at TEXT,                       -- когда последний раз выдана (ротация: реюз least-recently-used)
   notes            TEXT,
   created_at       TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_proxies_country ON proxies(country, last_assigned_at);
+
+-- Именованные группы прокси: назначение по видам работы (publish|register|serp) + опц. привязка к сайтам.
+CREATE TABLE IF NOT EXISTS proxy_groups (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  name        TEXT    NOT NULL,
+  purposes    TEXT    NOT NULL DEFAULT 'publish,register,serp', -- CSV из publish|register|serp
+  site_ids    TEXT    NOT NULL DEFAULT '',                       -- CSV id сайтов; пусто = все сайты
+  notes       TEXT,
+  created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+);
 
 -- ===== Каталог площадок-кандидатов (parasite SEO discovery) =====
 -- Доноры для публикации: внесли домен → ведём статус/метрики/заметки → пишем модули регистрации и

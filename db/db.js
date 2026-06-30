@@ -71,6 +71,17 @@ function migrate(db) {
   ensureColumn(db, 'site_prospects', 'metrics_source', 'TEXT'); // источник метрик (semrush/dataforseo/manual)
   ensureColumn(db, 'site_prospects', 'metrics_updated_at', 'TEXT');
   ensureColumn(db, 'batches', 'max_tokens', 'INTEGER'); // с каким max_tokens отправлен батч (для разбора при сборе)
+  ensureColumn(db, 'proxies', 'group_id', 'INTEGER'); // именованная группа прокси (назначение по видам работы)
+  // Легаси-прокси без группы → в авто-группу со ВСЕМИ назначениями и всеми сайтами: поведение выдачи не меняется,
+  // пока пользователь не перенастроит группы. Идемпотентно (срабатывает только при наличии непривязанных прокси).
+  if (db.prepare('SELECT COUNT(*) c FROM proxies WHERE group_id IS NULL').get().c) {
+    let g = db.prepare('SELECT id FROM proxy_groups WHERE name = ?').get('Без назначения (импорт)');
+    if (!g) {
+      const r = db.prepare("INSERT INTO proxy_groups (name, purposes, site_ids) VALUES (?, 'publish,register,serp', '')").run('Без назначения (импорт)');
+      g = { id: r.lastInsertRowid };
+    }
+    db.prepare('UPDATE proxies SET group_id = ? WHERE group_id IS NULL').run(g.id);
+  }
 
   // Индексы под горячие запросы (после ensureColumn — колонки гарантированно существуют). IF NOT EXISTS — идемпотентно.
   // Тик планировщика каждые 30с фильтрует по (status, delete_at) и (status, rank_check_at); архив остаётся status='published',
