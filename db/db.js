@@ -72,15 +72,30 @@ function migrate(db) {
   ensureColumn(db, 'site_prospects', 'metrics_updated_at', 'TEXT');
   ensureColumn(db, 'batches', 'max_tokens', 'INTEGER'); // с каким max_tokens отправлен батч (для разбора при сборе)
   ensureColumn(db, 'proxies', 'group_id', 'INTEGER'); // именованная группа прокси (назначение по видам работы)
-  // Легаси-прокси без группы → в авто-группу со ВСЕМИ назначениями и всеми сайтами: поведение выдачи не меняется,
-  // пока пользователь не перенастроит группы. Идемпотентно (срабатывает только при наличии непривязанных прокси).
-  if (db.prepare('SELECT COUNT(*) c FROM proxies WHERE group_id IS NULL').get().c) {
-    let g = db.prepare('SELECT id FROM proxy_groups WHERE name = ?').get('Без назначения (импорт)');
-    if (!g) {
-      const r = db.prepare("INSERT INTO proxy_groups (name, purposes, site_ids) VALUES (?, 'publish,register,serp', '')").run('Без назначения (импорт)');
-      g = { id: r.lastInsertRowid };
+  // Легаси-прокси раскладываем по СТРАНАМ в авто-группы «Импорт <C>» (все назначения/сайты) — сохраняем гео-разделение
+  // исходных списков; поведение выдачи не меняется, пока пользователь не перенастроит. Также расщепляем старую
+  // единую группу «Без назначения (импорт)», если осталась от прежней миграции. Идемпотентно.
+  {
+    const oldG = db.prepare('SELECT id FROM proxy_groups WHERE name = ?').get('Без назначения (импорт)');
+    const oldId = oldG ? oldG.id : -1;
+    const need = db.prepare('SELECT DISTINCT country FROM proxies WHERE group_id IS NULL OR group_id = ?').all(oldId);
+    if (need.length) {
+      const ensureCountryGroup = (c) => {
+        const nm = 'Импорт ' + String(c || 'at').toUpperCase();
+        let g = db.prepare('SELECT id FROM proxy_groups WHERE name = ?').get(nm);
+        if (!g) {
+          const r = db.prepare("INSERT INTO proxy_groups (name, purposes, site_ids) VALUES (?, 'publish,register,serp', '')").run(nm);
+          g = { id: r.lastInsertRowid };
+        }
+        return g.id;
+      };
+      const assign = db.prepare('UPDATE proxies SET group_id = ? WHERE country = ? AND (group_id IS NULL OR group_id = ?)');
+      for (const { country } of need) assign.run(ensureCountryGroup(country), country, oldId);
+      // старую единую группу удаляем, если опустела после расщепления
+      if (oldG && !db.prepare('SELECT COUNT(*) c FROM proxies WHERE group_id = ?').get(oldG.id).c) {
+        db.prepare('DELETE FROM proxy_groups WHERE id = ?').run(oldG.id);
+      }
     }
-    db.prepare('UPDATE proxies SET group_id = ? WHERE group_id IS NULL').run(g.id);
   }
 
   // Индексы под горячие запросы (после ensureColumn — колонки гарантированно существуют). IF NOT EXISTS — идемпотентно.
