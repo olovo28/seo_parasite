@@ -499,13 +499,28 @@ ${acc.cookies_updated_at ? `<form method="post" action="/site-accounts/${acc.id}
     // ключи из сохранённых списков — для автоподсказки в поле «Целевой ключ»
     const kwSuggest = db.prepare('SELECT DISTINCT phrase FROM kw_list_items ORDER BY phrase').all();
     const kwDatalist = `<datalist id="kwlist-${id}">${kwSuggest.map((k) => `<option value="${esc(k.phrase)}"></option>`).join('')}</datalist>`;
+    // Списки ключей — для режима «Список ключей» (фолдится в единую панель генерации).
+    const listGenOpts = listLists(db).map((l) => `<option value="${l.id}" data-new="${l.c_new}">${esc(l.name)} — новых: ${l.c_new}</option>`).join('') || '<option value="">нет списков (создай в «Списки»)</option>';
+    // Единая панель: общие Промт + Движок сверху, переключатель «Источник» меняет только нужное поле и кнопку.
     const genBody = visiblePrompts.length
-      ? `<form method="post">${kwDatalist}
-<div class="row g-2 mb-2 align-items-end"><div class="col"><label class="form-label">Промт</label><select name="prompt" class="form-select" required>${promptOpts}</select></div>${backendRadio()}<div class="col-auto"><label class="form-label">Статей (для пачки)</label><input name="count" type="number" class="form-control" value="10" min="1" style="width:7rem"></div></div>
-<div class="row g-2 mb-2 align-items-end"><div class="col"><label class="form-label">Целевой ключ <span class="text-secondary small">— опц., подставится в <code>{{KEYWORD}}</code> промта (для «Сейчас, 1 шт»)</span></label><input name="keyword" class="form-control" list="kwlist-${id}" placeholder="например: book of dead freispiele ohne einzahlung"></div></div>
-<label class="form-check"><input type="checkbox" class="form-check-input" name="confirm" value="1" required><span class="form-check-label">Подтверждаю запуск генерации</span></label>
-<div class="d-flex flex-wrap gap-2 mt-2"><button type="submit" class="btn btn-primary" formaction="/sites/${id}/generate">Сгенерировать сейчас (1 шт)</button><button type="submit" class="btn btn-outline-primary" formaction="/sites/${id}/batch">Отправить пачкой (−50%, API)</button></div>
-<p class="text-secondary small mt-2 mb-0">«Сейчас» — одна статья сразу (статус в Задачах), движок по выбору. «Пачкой» — N статей через Batches API (−50%, только API), потом «Собрать». «Тариф» использует подписку (нужен запущенный хостовый мост). Раскладка по времени — в разделе <a href="/articles?site=${id}">Статьи</a>.</p></form>`
+      ? `<form method="post" id="gencard-${id}">${kwDatalist}
+<div class="row g-2 mb-3 align-items-end"><div class="col"><label class="form-label">Промт <span class="text-secondary small">— ключ подставляется в <code>{{KEYWORD}}</code></span></label><select name="prompt" class="form-select" required>${promptOpts}</select></div>${backendRadio()}</div>
+<div class="mb-2"><label class="form-label d-block mb-1">Источник ключей</label>
+<div class="btn-group" role="group">
+<input type="radio" class="btn-check" name="gensrc" id="src-one-${id}" value="one" checked><label class="btn btn-outline-primary" for="src-one-${id}"><i class="ti ti-key"></i> Один ключ</label>
+<input type="radio" class="btn-check" name="gensrc" id="src-list-${id}" value="list"><label class="btn btn-outline-primary" for="src-list-${id}"><i class="ti ti-list-check"></i> Список ключей</label>
+<input type="radio" class="btn-check" name="gensrc" id="src-batch-${id}" value="batch"><label class="btn btn-outline-primary" for="src-batch-${id}"><i class="ti ti-stack-2"></i> Пачкой (−50%)</label>
+</div></div>
+<div class="gm-one mb-2"><label class="form-label">Целевой ключ <span class="text-secondary small">— опц.</span></label><input name="keyword" class="form-control" list="kwlist-${id}" placeholder="например: book of dead freispiele ohne einzahlung"></div>
+<div class="row g-2 mb-2 align-items-end"><div class="col-md-7 gm-list d-none"><label class="form-label">Список ключей</label><select name="list" class="form-select">${listGenOpts}</select></div><div class="col-md-3 gm-count d-none"><label class="form-label count-label">Статей</label><input name="count" type="number" class="form-control" value="10" min="1"></div></div>
+<label class="form-check mb-2"><input type="checkbox" class="form-check-input" name="confirm" value="1" required><span class="form-check-label">Подтверждаю запуск генерации</span></label>
+<div class="d-flex flex-wrap gap-2">
+<button type="submit" class="btn btn-primary genbtn" data-mode="one" formaction="/sites/${id}/generate"><i class="ti ti-bolt"></i> Сгенерировать (1 шт)</button>
+<button type="submit" class="btn btn-primary genbtn d-none" data-mode="list" formaction="/lists/bulk-generate"><i class="ti ti-bolt"></i> Сгенерировать из списка</button>
+<button type="submit" class="btn btn-primary genbtn d-none" data-mode="batch" formaction="/sites/${id}/batch"><i class="ti ti-stack-2"></i> Отправить пачкой (−50%, API)</button>
+</div>
+<p class="text-secondary small mt-2 mb-0"><b>Один ключ</b> — 1 статья сразу (ключ опц.). <b>Список</b> — N новых ключей из списка, по статье на ключ. <b>Пачкой</b> — N статей через Batches API (−50%, только API), затем «Собрать» (история ниже). Раскладка по времени — в разделе <a href="/articles?site=${id}">Статьи</a>; «Тариф» — подписка (нужен хостовый мост).</p>
+<script>(function(){var R=document.getElementById('gencard-${id}');if(!R)return;var btns=R.querySelectorAll('.genbtn');var one=R.querySelector('.gm-one'),lst=R.querySelector('.gm-list'),cnt=R.querySelector('.gm-count');var kw=R.querySelector('[name=keyword]'),list=R.querySelector('[name=list]'),count=R.querySelector('[name=count]'),clbl=R.querySelector('.count-label');var cli=R.querySelector('input[name=backend][value=cli]'),api=R.querySelector('input[name=backend][value=api]');function newsOf(){var o=list&&list.options[list.selectedIndex];return o?parseInt(o.getAttribute('data-new'),10)||0:0;}function apply(m){one.classList.toggle('d-none',m!=='one');lst.classList.toggle('d-none',m!=='list');cnt.classList.toggle('d-none',m==='one');if(kw)kw.disabled=m!=='one';if(list)list.disabled=m!=='list';if(count)count.disabled=m==='one';if(m==='list'){clbl.textContent='Сколько (из новых)';var n=newsOf();count.max=n>0?n:1;if(!count.value||parseInt(count.value,10)>n)count.value=n||1;}else if(m==='batch'){clbl.textContent='Статей';count.removeAttribute('max');}if(cli){cli.disabled=(m==='batch');if(m==='batch'&&cli.checked)api.checked=true;}btns.forEach(function(b){var on=b.getAttribute('data-mode')===m;b.classList.toggle('d-none',!on);b.disabled=!on;});}R.querySelectorAll('input[name=gensrc]').forEach(function(r){r.addEventListener('change',function(){if(r.checked)apply(r.value);});});if(list)list.addEventListener('change',function(){if(!lst.classList.contains('d-none'))apply('list');});var c=R.querySelector('input[name=gensrc]:checked');apply(c?c.value:'one');})();</script></form>`
       : '<p class="text-secondary">Сначала создай промт.</p>';
     const manualBody = `<form method="post" action="/sites/${id}/manual-article">
 <div class="row g-2 mb-2"><div class="col-md-8"><label class="form-label mb-1 small">Заголовок</label><input name="title" class="form-control" required placeholder="Überschrift"></div><div class="col-md-4"><label class="form-label mb-1 small">Промт (какой использовал)</label><select name="prompt" class="form-select" required>${promptOpts}</select></div></div>
@@ -537,22 +552,8 @@ ${acc.cookies_updated_at ? `<form method="post" action="/site-accounts/${acc.id}
 <li class="nav-item"><button class="nav-link" type="button" data-tab="generate"><i class="ti ti-edit"></i> Генерация</button></li>
 <li class="nav-item"><button class="nav-link" type="button" data-tab="articles"><i class="ti ti-news"></i> Статьи</button></li>
 <li class="nav-item"><button class="nav-link" type="button" data-tab="settings"><i class="ti ti-settings"></i> Настройки</button></li></ul>`;
-    // --- генерация по списку ключей (берёт «новые» ключи списка, по {{KEYWORD}} в промте) ---
-    const listGenOpts = listLists(db).map((l) => `<option value="${l.id}" data-new="${l.c_new}">${esc(l.name)} — новых: ${l.c_new}</option>`).join('') || '<option value="">нет списков (создай в «Списки»)</option>';
-    const promptGenOpts = visiblePrompts.map((p) => `<option value="${p.id}">${promptName(p)}</option>`).join('') || '<option value="">нет промтов</option>';
-    const listGenCard = card(
-      '<i class="ti ti-target"></i> Генерация по списку ключей',
-      `<form method="post" action="/lists/bulk-generate" onsubmit="return confirm('Запустить генерацию по списку? (платно)')"><div class="row g-2 align-items-end">
-<div class="col-md-5"><label class="form-label small mb-1">Список ключей</label><select name="list" class="form-select form-select-sm listgensel">${listGenOpts}</select></div>
-<div class="col-md-4"><label class="form-label small mb-1">Промт (вставь <code>{{KEYWORD}}</code>)</label><select name="prompt" class="form-select form-select-sm">${promptGenOpts}</select></div>
-<div class="col-md-2"><label class="form-label small mb-1">Сколько (из новых)</label><input name="count" type="number" class="form-control form-control-sm listgencount" value="10" min="1" max="50"></div>
-<div class="col-md-12 mt-1">${backendRadio()}</div>
-<div class="col-md-1"><button class="btn btn-primary btn-sm w-100">Сген.</button></div></div>
-<div class="text-secondary small mt-2">Берёт N ещё не использованных ключей (статус «новый»), под каждый генерит статью (ключ подставляется в промт по плейсхолдеру <code>{{KEYWORD}}</code>), помечает их «в тесте» и связывает со статьёй. Если в списке новых меньше N — сгенерит сколько есть; повторов не будет.</div></form>
-<script>(function(){var s=document.querySelector('.listgensel'),c=document.querySelector('.listgencount');if(!s||!c)return;function sync(){var o=s.options[s.selectedIndex];var n=o?parseInt(o.getAttribute('data-new'),10)||0:0;c.max=n>0?n:1;if(!c.value||parseInt(c.value,10)>n)c.value=n;}s.addEventListener('change',sync);sync();})();</script>`,
-      'listgen',
-    );
-    const paneGenerate = `<div id="tab-generate" class="d-none">${genCard}${listGenCard}${promptsCard}${batchesCard}</div>`;
+    // «Генерация по списку ключей» влита в единую панель genCard (режим «Список ключей»).
+    const paneGenerate = `<div id="tab-generate" class="d-none">${genCard}${promptsCard}${batchesCard}</div>`;
     const paneArticles = `<div id="tab-articles" class="d-none">${articlesWs}</div>`;
     const paneSettings = `<div id="tab-settings" class="d-none">${settings}${accountsCard}${registrationCard}</div>`;
     const tabScript = `<script>(function(){var DEF='generate',KEY='siteTab:${id}';var btns=document.querySelectorAll('[data-tab]');var panes={generate:document.getElementById('tab-generate'),articles:document.getElementById('tab-articles'),settings:document.getElementById('tab-settings')};function show(name){if(!panes[name])name=DEF;for(var k in panes){panes[k].classList.toggle('d-none',k!==name);}btns.forEach(function(b){b.classList.toggle('active',b.getAttribute('data-tab')===name);});try{localStorage.setItem(KEY,name);}catch(e){}}btns.forEach(function(b){b.addEventListener('click',function(){show(b.getAttribute('data-tab'));});});var qtab=new URLSearchParams(location.search).get('tab');var h=location.hash&&document.querySelector(location.hash);var stored;try{stored=localStorage.getItem(KEY);}catch(e){}var initial=qtab&&panes[qtab]?qtab:(h?(Object.keys(panes).find(function(k){return panes[k]===h||panes[k].contains(h);})||DEF):(stored&&panes[stored]?stored:DEF));show(initial);if(h&&initial!=='generate'){setTimeout(function(){try{h.scrollIntoView();}catch(e){}},50);}})();</script>`;
