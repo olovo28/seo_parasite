@@ -23,7 +23,7 @@ import { isDolphinRunning } from '../lib/dolphin.js';
 import { adapterList, getAdapter } from '../lib/sites/index.js';
 import { EU_TZ, zonedToEpoch, epochToZoned, utcStamp, parseStamp, fmtInTz, nextDailyOccurrence } from '../lib/time.js';
 import { listEmailAccounts, freeEmailAccounts, addEmailAccount, importEmailAccounts, toggleEmailAccount, removeEmailAccount, clearEmailCookies, releaseEmail } from '../lib/emailAccounts.js';
-import { importProxies, proxyPoolStats, proxyCountries } from '../lib/proxyPool.js';
+import { importProxies, listGroups, getGroup, createGroup, updateGroup, deleteGroup, setProxiesGroup, PROXY_PURPOSES } from '../lib/proxyPool.js';
 import { listRegistrations } from '../lib/registrations.js';
 import { registerOnSite, checkApproval } from '../lib/registrar.js';
 import { mailProviderList } from '../lib/mail/index.js';
@@ -2151,19 +2151,8 @@ ${e.site_id ? `<form method="post" action="/email-accounts/${e.id}/release" titl
 <button type="submit" class="btn btn-primary mt-2">Импортировать</button></form></div></details>`;
     const tableHtml = `<div class="card mb-3"><div class="card-header"><h3 class="card-title"><i class="ti ti-mail"></i> Пул почт (${rows.length})</h3></div><div class="table-responsive"><table class="table table-vcenter card-table"><thead><tr><th>id</th><th>акт.</th><th>провайдер</th><th>email</th><th>пароль</th><th>прокси</th><th>статус</th><th>сайт</th><th>сессия</th><th></th></tr></thead><tbody>${tr || '<tr><td colspan="10" class="text-secondary">почт нет — добавь</td></tr>'}</tbody></table></div><div class="card-footer">${addForm}<div class="mt-2">${importForm}</div></div></div>`;
 
-    // --- Пул прокси по странам ---
-    const pstats = proxyPoolStats(db);
-    const pstatRows = pstats.map((s) => `<tr><td><b>${esc(s.country)}</b></td><td>${s.total}</td><td class="text-secondary">${s.used_recently} (за 12ч)</td></tr>`).join('');
-    const proxyImport = `<form method="post" action="/proxies/import">
-<div class="mb-2 d-flex gap-2 align-items-center"><span class="small text-secondary">страна пула:</span><input name="country" class="form-control form-control-sm" value="de" placeholder="de" style="width:5rem" required><span class="small text-secondary">вставь список (по строке): scheme://user:pass@host:port</span></div>
-<textarea name="text" class="form-control mono" rows="6" placeholder="http://user:pass@gate.host:10000&#10;http://user:pass@gate.host:10001&#10;…"></textarea>
-<button type="submit" class="btn btn-primary mt-2">Загрузить прокси в пул</button></form>`;
-    const proxyCard = `<div class="card mb-3"><div class="card-header"><h3 class="card-title"><i class="ti ti-world-bolt"></i> Пул прокси (по странам)</h3></div>
-<div class="table-responsive"><table class="table table-vcenter card-table"><thead><tr><th>страна</th><th>всего</th><th>использовано недавно</th></tr></thead><tbody>${pstatRows || '<tr><td colspan="3" class="text-secondary">пул пуст — загрузи список ниже</td></tr>'}</tbody></table></div>
-<div class="card-footer">${proxyImport}<div class="text-secondary small mt-2">Резидентные ротационные: выдаются по принципу «давно не использованная — первой» (реюз после простоя). При импорте почт без своей прокси берётся свободная из пула указанной страны.</div></div></div>`;
-
-    const note = '<div class="text-secondary small mb-2">Почты — общий ресурс сети (одна почта = один сайт). Прокси берутся из пула по стране почты и распределяются автоматически.</div>';
-    reply.type('text/html').send(page('/emails', 'Почты', note + proxyCard + tableHtml, { flash: flash(req.query) }));
+    const note = '<div class="text-secondary small mb-2">Почты — общий ресурс сети (одна почта = один сайт). Прокси берутся из пула по стране почты (раздел <a href="/proxies">Прокси</a>) и распределяются автоматически.</div>';
+    reply.type('text/html').send(page('/emails', 'Почты', note + tableHtml, { flash: flash(req.query) }));
   });
 
   app.post('/emails', async (req, reply) => {
@@ -2180,9 +2169,62 @@ ${e.site_id ? `<form method="post" action="/email-accounts/${e.id}/release" titl
     const np = r.noProxy ? `, без прокси ${r.noProxy} (пул ${esc(req.body.country || 'at')} кончился)` : '';
     reply.redirect(`/emails?msg=${encodeURIComponent(`Импорт: добавлено ${r.added}, дублей ${r.skipped}, ошибок ${r.errors.length}${np}`)}`);
   });
+  // ===== Прокси: именованные группы (назначение по видам работы) + пул =====
+  const maskProxy = (u) => String(u || '').replace(/\/\/[^@/]*@/, '//***@');
+  app.get('/proxies', async (req, reply) => {
+    const groups = listGroups(db);
+    const sites = db.prepare('SELECT id, name FROM sites ORDER BY id').all();
+    const purposeBadges = (csv) => PROXY_PURPOSES.filter(([k]) => (',' + (csv || '') + ',').includes(',' + k + ',')).map(([, l]) => `<span class="badge bg-blue text-white me-1">${l}</span>`).join('') || '<span class="text-secondary">—</span>';
+    const sitesLabel = (csv) => { if (!csv) return '<span class="text-secondary">все</span>'; return csv.split(',').map(Number).map((id) => esc((sites.find((s) => s.id === id) || {}).name || ('#' + id))).join(', '); };
+    const purposeChecks = (csv) => PROXY_PURPOSES.map(([k, l]) => `<label class="form-check form-check-inline"><input type="checkbox" class="form-check-input" name="purposes" value="${k}" ${(',' + (csv || '') + ',').includes(',' + k + ',') ? 'checked' : ''}><span class="form-check-label">${l}</span></label>`).join('');
+    const siteChecks = (csv) => { const sel = new Set((csv || '').split(',').map(Number)); return sites.length ? sites.map((s) => `<label class="form-check form-check-inline"><input type="checkbox" class="form-check-input" name="site_ids" value="${s.id}" ${sel.has(s.id) ? 'checked' : ''}><span class="form-check-label">${esc(s.name)}</span></label>`).join('') : '<span class="text-secondary small">сайтов нет</span>'; };
+    const groupRows = groups.map((g) => `<tr><td><b>${esc(g.name)}</b></td><td>${purposeBadges(g.purposes)}</td><td>${sitesLabel(g.site_ids)}</td><td><a href="/proxies?group=${g.id}">${g.cnt}</a></td><td>
+<details><summary class="btn btn-sm btn-outline-secondary">править</summary><form method="post" action="/proxies/groups/${g.id}/edit" class="mt-2" style="min-width:20rem"><input name="name" class="form-control form-control-sm mb-2" value="${esc(g.name)}"><div class="mb-2"><div class="small text-secondary">назначение:</div>${purposeChecks(g.purposes)}</div><div class="mb-2"><div class="small text-secondary">сайты (ничего = все):</div>${siteChecks(g.site_ids)}</div><button class="btn btn-sm btn-primary">Сохранить</button></form>
+<form method="post" action="/proxies/groups/${g.id}/delete" class="mt-1" onsubmit="return confirm('Удалить группу «${esc(g.name)}»? Прокси не удалятся — отвяжутся.')"><button class="btn btn-sm btn-outline-danger">Удалить группу</button></form></details></td></tr>`).join('');
+    const groupsCard = tableCard('<i class="ti ti-route"></i> Группы прокси', ['имя', 'назначение', 'сайты', 'прокси', ''], groupRows, 'pgroups');
+    const createCard = card('<i class="ti ti-plus"></i> Новая группа', `<form method="post" action="/proxies/groups">
+<div class="mb-2"><label class="form-label">Имя</label><input name="name" class="form-control" required placeholder="напр. AT — публикация сайт 1"></div>
+<div class="mb-2"><label class="form-label d-block">Назначение</label>${purposeChecks('')}</div>
+<div class="mb-2"><label class="form-label d-block">Сайты <span class="text-secondary small">(ничего не отмечено = все)</span></label>${siteChecks('')}</div>
+<button class="btn btn-primary">Создать</button></form>`);
+    const groupOpts = groups.map((g) => `<option value="${g.id}">${esc(g.name)} (${g.cnt})</option>`).join('');
+    const importCard = card('<i class="ti ti-upload"></i> Импорт прокси в группу', `<form method="post" action="/proxies/import">
+<div class="row g-2 mb-2 align-items-end"><div class="col-auto"><label class="form-label">Страна</label><input name="country" class="form-control" value="at" style="width:6rem" required></div><div class="col"><label class="form-label">Группа</label><select name="group" class="form-select">${groupOpts || '<option value="">— сначала создай группу —</option>'}</select></div></div>
+<textarea name="text" class="form-control mono" rows="6" placeholder="по строке: scheme://user:pass@host:port"></textarea>
+<button class="btn btn-primary mt-2">Загрузить</button></form>`);
+    let proxiesCard = '';
+    if (req.query.group) {
+      const gid = Number(req.query.group);
+      const g = getGroup(db, gid);
+      const list = db.prepare('SELECT id, url, country, last_assigned_at FROM proxies WHERE group_id = ? ORDER BY id LIMIT 200').all(gid);
+      const total = db.prepare('SELECT COUNT(*) c FROM proxies WHERE group_id = ?').get(gid).c;
+      const prows = list.map((p) => `<tr><td><input type="checkbox" name="ids" form="pmove" value="${p.id}"></td><td class="mono small">${esc(maskProxy(p.url))}</td><td>${esc(p.country)}</td><td class="text-secondary small">${esc(p.last_assigned_at || '—')}</td></tr>`).join('');
+      const moveOpts = groups.filter((x) => x.id !== gid).map((x) => `<option value="${x.id}">${esc(x.name)}</option>`).join('');
+      proxiesCard = `<div class="card mb-3"><div class="card-header"><h3 class="card-title">Прокси группы «${esc(g ? g.name : '')}» (${total}${total > 200 ? ', показаны 200' : ''})</h3></div>
+<div class="table-responsive" style="max-height:420px;overflow:auto"><table class="table table-sm card-table"><thead><tr><th style="width:1%"></th><th>хост</th><th>страна</th><th>выдан</th></tr></thead><tbody>${prows || '<tr><td colspan="4" class="text-secondary p-3">пусто</td></tr>'}</tbody></table></div>
+<div class="card-footer"><form id="pmove" method="post" action="/proxies/move" class="d-flex gap-2 align-items-center flex-wrap"><input type="hidden" name="from" value="${gid}"><span class="small text-secondary">выбранные →</span><select name="group" class="form-select form-select-sm" style="width:auto">${moveOpts || '<option value="">нет других групп</option>'}</select><button class="btn btn-sm btn-primary">Переместить</button></form></div></div>`;
+    }
+    reply.type('text/html').send(page('/proxies', 'Прокси', groupsCard + createCard + importCard + proxiesCard, { flash: flash(req.query) }));
+  });
+  app.post('/proxies/groups', async (req, reply) => {
+    createGroup(db, { name: req.body.name, purposes: req.body.purposes, siteIds: req.body.site_ids });
+    reply.redirect(`/proxies?msg=${encodeURIComponent('Группа создана')}`);
+  });
+  app.post('/proxies/groups/:id/edit', async (req, reply) => {
+    updateGroup(db, Number(req.params.id), { name: req.body.name, purposes: req.body.purposes, siteIds: req.body.site_ids });
+    reply.redirect(`/proxies?msg=${encodeURIComponent('Группа обновлена')}`);
+  });
+  app.post('/proxies/groups/:id/delete', async (req, reply) => {
+    deleteGroup(db, Number(req.params.id));
+    reply.redirect(`/proxies?msg=${encodeURIComponent('Группа удалена (прокси отвязаны)')}`);
+  });
   app.post('/proxies/import', async (req, reply) => {
-    const r = importProxies(db, req.body.text, { country: req.body.country });
-    reply.redirect(`/emails?msg=${encodeURIComponent(`Прокси [${r.country}]: добавлено ${r.added}, обновлено/дублей ${r.skipped}, ошибок ${r.errors.length}`)}`);
+    const r = importProxies(db, req.body.text, { country: req.body.country, groupId: req.body.group || null });
+    reply.redirect(`/proxies?msg=${encodeURIComponent(`Прокси [${r.country}]: добавлено ${r.added}, обновлено/дублей ${r.skipped}, ошибок ${r.errors.length}`)}`);
+  });
+  app.post('/proxies/move', async (req, reply) => {
+    const n = setProxiesGroup(db, req.body.ids, req.body.group || null);
+    reply.redirect(`/proxies?group=${encodeURIComponent(req.body.from || '')}&msg=${encodeURIComponent(`Перемещено: ${n}`)}`);
   });
   app.post('/email-accounts/:id/toggle', async (req, reply) => {
     toggleEmailAccount(db, Number(req.params.id));
