@@ -501,17 +501,19 @@ ${acc.cookies_updated_at ? `<form method="post" action="/site-accounts/${acc.id}
     const genBody = visiblePrompts.length
       ? `<form method="post" id="gencard-${id}">${kwDatalist}
 <div class="row g-2 mb-2 align-items-end"><div class="col"><label class="form-label">Промт <span class="text-secondary small">— ключ подставляется в <code>{{KEYWORD}}</code></span></label><select name="prompt" class="form-select" required>${promptOpts}</select></div></div>
-<div class="mb-3"><label class="form-label d-block mb-1">Движок <span class="text-secondary small">— выбери явно</span></label>
+<div class="d-flex flex-wrap gap-4 mb-3">
+<div><label class="form-label d-block mb-1">Движок <span class="text-secondary small">— выбери явно</span></label>
 <div class="btn-group" role="group">
 <input type="radio" class="btn-check" name="backend" id="be-api-${id}" value="api"><label class="btn btn-outline-primary" for="be-api-${id}"><i class="ti ti-coin"></i> API <span class="text-secondary">(платно)</span></label>
 <input type="radio" class="btn-check" name="backend" id="be-cli-${id}" value="cli"><label class="btn btn-outline-primary" for="be-cli-${id}"><i class="ti ti-user-check"></i> Тариф <span class="text-secondary">(подписка)</span></label>
 </div></div>
-<div class="mb-2"><label class="form-label d-block mb-1">Источник ключей</label>
+<div><label class="form-label d-block mb-1">Источник ключей</label>
 <div class="btn-group" role="group">
 <input type="radio" class="btn-check" name="gensrc" id="src-one-${id}" value="one" checked><label class="btn btn-outline-primary" for="src-one-${id}"><i class="ti ti-key"></i> Один ключ</label>
 <input type="radio" class="btn-check" name="gensrc" id="src-list-${id}" value="list"><label class="btn btn-outline-primary" for="src-list-${id}"><i class="ti ti-list-check"></i> Список ключей</label>
 <input type="radio" class="btn-check" name="gensrc" id="src-batch-${id}" value="batch"><label class="btn btn-outline-primary" for="src-batch-${id}"><i class="ti ti-stack-2"></i> Пачкой (−50%)</label>
 </div></div>
+</div>
 <div class="gm-one mb-2"><label class="form-label">Целевой ключ <span class="text-secondary small">— опц.</span></label><input name="keyword" class="form-control" list="kwlist-${id}" placeholder="например: book of dead freispiele ohne einzahlung"></div>
 <div class="row g-2 mb-2 align-items-end"><div class="col-md-7 gm-list d-none"><label class="form-label">Список ключей</label><select name="list" class="form-select">${listGenOpts}</select></div><div class="col-md-3 gm-count d-none"><label class="form-label count-label">Статей</label><input name="count" type="number" class="form-control" value="10" min="1"></div></div>
 <label class="form-check mb-2"><input type="checkbox" class="form-check-input" name="confirm" value="1" required><span class="form-check-label">Подтверждаю запуск генерации</span></label>
