@@ -440,13 +440,16 @@ ${acc.cookies_updated_at ? `<form method="post" action="/site-accounts/${acc.id}
       .map((r) => {
         const cb = r.status === 'awaiting_admin' ? `<input class="form-check-input m-0" type="checkbox" name="regs" value="${r.id}" form="regcheck">` : '';
         const check = r.status === 'awaiting_admin' ? `<form method="post" action="/registrations/${r.id}/check" onsubmit="return confirm('Проверить одобрение по IMAP?')"><button class="btn btn-sm btn-outline-secondary">проверить</button></form>` : '';
-        const retry = retryStatuses.includes(r.status) ? `<form method="post" action="/registrations/${r.id}/retry" onsubmit="return confirm('Повторить регистрацию (последовательно)?')"><button class="btn btn-sm btn-outline-primary">повторить</button></form>` : '';
+        // Прошёл форму+подтверждение, но «не одобрено за N проверок» → вернуть в опрос одобрения (НЕ перерегистрация).
+        const canReopen = r.status === 'failed' && r.confirm_url;
+        const reopen = canReopen ? `<form method="post" action="/registrations/${r.id}/reopen" onsubmit="return confirm('Вернуть в проверку одобрения? (опрос почты возобновится, без перерегистрации)')"><button class="btn btn-sm btn-outline-secondary">вернуть в проверку</button></form>` : '';
+        const retry = retryStatuses.includes(r.status) && !canReopen ? `<form method="post" action="/registrations/${r.id}/retry" onsubmit="return confirm('Повторить регистрацию (последовательно)?')"><button class="btn btn-sm btn-outline-primary">повторить</button></form>` : '';
         return `<tr><td>${cb}</td><td>${r.id}</td><td>${esc(r.email)}</td><td>${regStatusBadge(r.status)}</td><td class="text-secondary small">${esc(r.identity?.name || '-')}</td>
 <td class="text-secondary small" style="white-space:nowrap">${esc(fmtInTz(r.submitted_at, 'UTC'))}</td>
 <td class="text-secondary small" style="white-space:nowrap">${r.approved_at ? esc(fmtInTz(r.approved_at, 'UTC')) : '—'}</td>
 <td class="text-secondary small" style="white-space:nowrap">${r.last_checked_at ? esc(fmtInTz(r.last_checked_at, 'UTC')) + (r.checks ? ` <span class="text-secondary">(${r.checks})</span>` : '') : '—'}</td>
 <td class="text-secondary small">${esc((r.error || '').slice(0, 60))}</td>
-<td><div class="d-flex gap-1">${check}${retry}</div></td></tr>`;
+<td><div class="d-flex gap-1">${check}${reopen}${retry}</div></td></tr>`;
       })
       .join('');
     const selectAllCb = anyAwaiting ? `<input class="form-check-input m-0" type="checkbox" title="выбрать все «ждём одобрения»" onclick="var on=this.checked;document.querySelectorAll('input[name=regs]').forEach(function(c){c.checked=on});">` : '';
@@ -2378,6 +2381,16 @@ ${e.site_id ? `<form method="post" action="/email-accounts/${e.id}/release" titl
     if (!reg) return reply.redirect(`/sites/?msg=${encodeURIComponent('Регистрация не найдена')}`);
     const jobId = enqueueRegistration(reg.site_id, reg.email_account_id);
     reply.redirect(`/jobs/${jobId}`);
+  });
+  // Вернуть провалившуюся (по таймауту одобрения) регистрацию в опрос одобрения — БЕЗ перерегистрации.
+  // Только для тех, кто прошёл форму+подтверждение (confirm_url есть): сбрасываем счётчик, проверим сейчас.
+  app.post('/registrations/:id/reopen', async (req, reply) => {
+    const regId = Number(req.params.id);
+    const reg = db.prepare('SELECT site_id, confirm_url FROM site_registrations WHERE id = ?').get(regId);
+    if (!reg) return reply.redirect(`/sites/?msg=${encodeURIComponent('Регистрация не найдена')}`);
+    if (!reg.confirm_url) return reply.redirect(`/sites/${reg.site_id}?tab=settings&msg=${encodeURIComponent('Нельзя вернуть в проверку: регистрация не прошла подтверждение — используй «повторить».')}#registration`);
+    db.prepare("UPDATE site_registrations SET status = 'awaiting_admin', checks = 0, next_check_at = datetime('now'), error = NULL, updated_at = datetime('now') WHERE id = ?").run(regId);
+    reply.redirect(`/sites/${reg.site_id}?tab=settings&msg=${encodeURIComponent('Возвращена в проверку одобрения — опрос почты возобновлён.')}#registration`);
   });
   // Массовая проверка одобрения по IMAP: одна задача, регистрации проверяются последовательно
   // (IMAP без Dolphin; на отказ прокси registrar сам меняет её на свободную из пула).
