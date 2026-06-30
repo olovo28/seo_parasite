@@ -165,8 +165,8 @@ async function tick() {
         console.log(`  ${res.ok ? '✓' : '·'} reg id=${id}: ${res.message}`);
       } catch (e) {
         console.error(`  ✗ reg id=${id}: ${e.message}`);
-        // не зацикливаем тик: откладываем следующую проверку на сутки
-        db.prepare("UPDATE site_registrations SET next_check_at = datetime('now','+1 day'), error = ? WHERE id = ? AND status = 'awaiting_admin'").run(e.message, id);
+        // не зацикливаем тик: откладываем следующую проверку на 12 ч (дважды в день)
+        db.prepare("UPDATE site_registrations SET next_check_at = datetime('now','+12 hours'), error = ? WHERE id = ? AND status = 'awaiting_admin'").run(e.message, id);
       }
     }
   } finally {

@@ -25,7 +25,7 @@ import { EU_TZ, zonedToEpoch, epochToZoned, utcStamp, parseStamp, fmtInTz, nextD
 import { listEmailAccounts, freeEmailAccounts, addEmailAccount, importEmailAccounts, toggleEmailAccount, removeEmailAccount, clearEmailCookies, releaseEmail } from '../lib/emailAccounts.js';
 import { importProxies, listGroups, getGroup, createGroup, updateGroup, deleteGroup, setProxiesGroup, PROXY_PURPOSES } from '../lib/proxyPool.js';
 import { listRegistrations } from '../lib/registrations.js';
-import { registerOnSite, checkApproval } from '../lib/registrar.js';
+import { registerOnSite, checkApproval, MAX_APPROVAL_CHECKS } from '../lib/registrar.js';
 import { mailProviderList } from '../lib/mail/index.js';
 import { createMailbox } from '../lib/mailRegistrar.js';
 import { getSmsProvider } from '../lib/sms/index.js';
@@ -1496,7 +1496,7 @@ if('${j.status}'==='running'){poll();}
       .all();
     const summaryTxt = regSummary.length ? regSummary.map((x) => `${esc(regStatusRu[x.status] || x.status)}: ${x.c}`).join(' · ') : 'регистраций ещё нет';
     const regRows = regAwait
-      .map((r) => `<tr><td>${r.id}</td><td>${esc(r.site_name)}</td><td>${esc(r.email)}</td><td class="text-secondary" style="white-space:nowrap">${esc(fmtInTz(r.next_check_at, 'UTC'))} UTC</td><td class="text-secondary">${relFromNow(r.next_check_at)}</td><td class="text-secondary">${r.checks}/7</td></tr>`)
+      .map((r) => `<tr><td>${r.id}</td><td>${esc(r.site_name)}</td><td>${esc(r.email)}</td><td class="text-secondary" style="white-space:nowrap">${esc(fmtInTz(r.next_check_at, 'UTC'))} UTC</td><td class="text-secondary">${relFromNow(r.next_check_at)}</td><td class="text-secondary">${r.checks}/${MAX_APPROVAL_CHECKS}</td></tr>`)
       .join('');
     const regCard = tableCard(
       `<i class="ti ti-user-plus"></i> Регистрации — очередь проверок одобрения (${regAwait.length})`,
