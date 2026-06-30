@@ -3,7 +3,6 @@
 const NAV = [
   ['/', 'Дашборд', 'dashboard'],
   ['/sites', 'Сайты', 'world'],
-  ['/prospects', 'Площадки', 'radar'],
   ['/emails', 'Почты', 'mail'],
   ['/settings', 'Настройки', 'settings'],
   ['/scheduler', 'Планировщик', 'calendar-event'],
