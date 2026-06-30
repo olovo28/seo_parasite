@@ -4,6 +4,7 @@ const NAV = [
   ['/', 'Дашборд', 'dashboard'],
   ['/sites', 'Сайты', 'world'],
   ['/emails', 'Почты', 'mail'],
+  ['/mailboxes', 'Регистрация почт', 'user-plus'],
   ['/proxies', 'Прокси', 'route'],
   ['/settings', 'Настройки', 'settings'],
   ['/scheduler', 'Планировщик', 'calendar-event'],

@@ -27,6 +27,8 @@ import { importProxies, listGroups, getGroup, createGroup, updateGroup, deleteGr
 import { listRegistrations } from '../lib/registrations.js';
 import { registerOnSite, checkApproval } from '../lib/registrar.js';
 import { mailProviderList } from '../lib/mail/index.js';
+import { createMailbox } from '../lib/mailRegistrar.js';
+import { getSmsProvider } from '../lib/sms/index.js';
 import { collectArticleStats, collectStatsForSite, keywordStats, articleStatsRows, articleLatestStats } from '../lib/stats.js';
 import { checkArticleRank, checkRanksForSite, latestRanks, DACH } from '../lib/serp.js';
 
@@ -57,7 +59,7 @@ const tbl = (head, rows) =>
 const tableCard = (title, head, rows, id, footer) =>
   `<div class="card mb-3"${id ? ` id="${id}"` : ''}><div class="card-header"><h3 class="card-title">${title}</h3></div><div class="table-responsive"><table class="table table-vcenter card-table"><thead><tr>${head.map((h) => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows || `<tr><td colspan="${head.length}" class="text-secondary">нет</td></tr>`}</tbody></table></div>${footer ? `<div class="card-footer">${footer}</div>` : ''}</div>`;
 const promptName = (p) => esc(p.name || `Промт ${p.id}`);
-const jobTypeRu = (t) => (t === 'generate' ? 'генерация' : t === 'publish' ? 'публикация' : t === 'register' ? 'регистрация' : t === 'stats' ? 'статистика' : t === 'rank' ? 'позиции' : esc(t));
+const jobTypeRu = (t) => (t === 'generate' ? 'генерация' : t === 'publish' ? 'публикация' : t === 'register' ? 'регистрация' : t === 'stats' ? 'статистика' : t === 'rank' ? 'позиции' : t === 'mailbox' ? 'регистрация почт' : esc(t));
 // Ячейка позиции в выдаче: «#3» (зелёная топ-10 / жёлтая 11-30 / серая дальше) или «—». data-v для сортировки.
 const rankCell = (r) => {
   if (!r || r.position == null) return `<td data-v="999" class="text-secondary">${r && r.error ? '<span title="' + esc(r.error) + '">ошибка</span>' : '—'}</td>`;
@@ -1388,7 +1390,9 @@ ${card(`Ссылки (${links.length})`, tbl(['s2', 'бренд', 'final_url'], 
       try {
         const r = JSON.parse(j.result);
         const rids = r.ids || [];
-        if (rids.length) {
+        if (r.kind === 'mailbox' && (r.emails || []).length) {
+          resultCard = card(`<i class="ti ti-checklist"></i> Создано ящиков (${r.emails.length})`, `<p class="mb-2">Добавлены в пул <a href="/emails">Почты</a>.</p><div style="max-height:30vh;overflow:auto" class="mono small">${r.emails.map((e) => esc(e)).join('<br>')}</div>`);
+        } else if (rids.length) {
           const hint = { publish: 'Опубликованы на сайте. Чтобы отменить — снять с сайта на странице «Статьи».', generate: 'Созданы черновики. Чтобы отменить — удалить из БД на странице «Статьи».', delete: 'Сняты с сайта (отменить нельзя — уже удалены).' }[r.kind] || '';
           const links = rids.map((aid) => `<a href="/articles/${aid}" class="me-2 text-nowrap">#${aid}</a>`).join('');
           resultCard = card(`<i class="ti ti-checklist"></i> Что успело выполниться (${rids.length})`, `<p class="mb-2">${esc(hint)}</p><div style="max-height:30vh;overflow:auto">${links}</div>`);
@@ -2203,6 +2207,60 @@ ${e.site_id ? `<form method="post" action="/email-accounts/${e.id}/release" titl
     const np = r.noProxy ? `, без прокси ${r.noProxy} (пул ${esc(req.body.country || 'at')} кончился)` : '';
     reply.redirect(`/emails?msg=${encodeURIComponent(`Импорт: добавлено ${r.added}, дублей ${r.skipped}, ошибок ${r.errors.length}${np}`)}`);
   });
+  // ===== Регистрация почт: автосоздание ящиков через Dolphin (createMailbox по выбранному провайдеру) =====
+  app.get('/mailboxes', async (req, reply) => {
+    const provs = mailProviderList();
+    const opts = provs.map((p) => `<option value="${p.name}">${esc(p.label)}</option>`).join('');
+    const byProv = Object.fromEntries(db.prepare('SELECT provider, COUNT(*) c FROM email_accounts GROUP BY provider').all().map((r) => [r.provider, r.c]));
+    const provRows = provs.map((p) => `<tr><td>${esc(p.label)}</td><td class="mono">${esc(p.name)}</td><td>${byProv[p.name] || 0}</td></tr>`).join('');
+    let smsBal = '';
+    try {
+      const sms = getSmsProvider(db);
+      if (sms?.balance) smsBal = `5sim баланс: ${await sms.balance()}`;
+    } catch (e) {
+      smsBal = `5sim: ${e.message.slice(0, 50)}`;
+    }
+    const jobs = db.prepare("SELECT * FROM jobs WHERE type = 'mailbox' ORDER BY id DESC LIMIT 12").all();
+    const jobRows = jobs.map((j) => `<tr><td><a href="/jobs/${j.id}">#${j.id}</a></td><td>${jobBadge(j.status)}</td><td>${esc((j.message || '').slice(0, 80))}</td><td class="text-secondary">${esc(j.created_at)}</td></tr>`).join('');
+    const form = card('<i class="ti ti-user-plus"></i> Создать ящики', `<form method="post" action="/mailboxes/create" onsubmit="return confirm('Запустить создание ящиков через Dolphin? Расход: номер 5sim + капча за каждый.')">
+<div class="row g-2 align-items-end mb-2"><div class="col-auto"><label class="form-label">Провайдер</label><select name="provider" class="form-select">${opts}</select></div>
+<div class="col-auto"><label class="form-label">Сколько</label><input name="count" type="number" class="form-control" value="1" min="1" max="50" style="width:6rem"></div>
+<div class="col-auto"><label class="form-label">Страна (пул прокси)</label><input name="country" class="form-control" value="at" style="width:6rem"></div></div>
+<button class="btn btn-primary">Создать</button>
+<p class="text-secondary small mt-2 mb-0">Создаётся последовательно (один профиль Dolphin за раз): прокси «Регистрация» нужной страны → форма + капча (CaptchaFox) + SMS (5sim) → IMAP → запись в пул «Почты». Прервать — кнопкой «Остановить» на странице задачи. Драйверы: <b>GMX</b> рабочий; <b>web.de/mail.com</b> (United Internet) — нужна живая доводка селекторов/URL; <b>Outlook</b> — каркас (нужен решатель FunCaptcha).</p></form>`);
+    const provCard = tableCard('<i class="ti ti-mail-cog"></i> Провайдеры и пул', ['провайдер', 'код', 'почт в пуле'], provRows, 'mprov');
+    const jobsCard = tableCard('<i class="ti ti-history"></i> Недавние прогоны', ['задача', 'статус', 'итог', 'когда'], jobRows, 'mjobs');
+    const bal = smsBal ? `<div class="text-secondary small mb-2">${esc(smsBal)}</div>` : '';
+    reply.type('text/html').send(page('/mailboxes', 'Регистрация почт', bal + form + provCard + jobsCard, { flash: flash(req.query) }));
+  });
+  app.post('/mailboxes/create', async (req, reply) => {
+    const provider = String(req.body.provider || 'gmx');
+    const country = String(req.body.country || 'at').trim().toLowerCase() || 'at';
+    const count = Math.max(1, Math.min(50, Number(req.body.count) || 1));
+    const jobId = createJob('mailbox', {});
+    logJob(jobId, `Старт: создание ${count} ящиков [${provider}], страна ${country} — последовательно через Dolphin.`);
+    (async () => {
+      let ok = 0;
+      let fail = 0;
+      let stopped = false;
+      const done = [];
+      for (let i = 0; i < count; i++) {
+        if (isJobCancelled(jobId)) { stopped = true; break; }
+        logJob(jobId, `── ящик ${i + 1}/${count} ──`);
+        try {
+          const r = await createMailbox(db, { provider, country, onStep: (m) => logJob(jobId, m) });
+          if (r.ok) { ok += 1; done.push(r.email); }
+          else { fail += 1; logJob(jobId, `не создан: ${r.message}`); }
+        } catch (e) {
+          fail += 1;
+          logJob(jobId, `сбой: ${e.message}`);
+        }
+      }
+      finishJob(jobId, { ok: !stopped && fail === 0, stopped, message: `${stopped ? 'Остановлено. ' : ''}Создано ${ok} из ${count}${fail ? `, ошибок ${fail}` : ''}`, result: { kind: 'mailbox', emails: done } });
+    })().catch((e) => { try { finishJob(jobId, { ok: false, message: 'Сбой задачи: ' + e.message }); } catch {} });
+    reply.redirect(`/jobs/${jobId}`);
+  });
+
   // ===== Прокси: именованные группы (назначение по видам работы) + пул =====
   const maskProxy = (u) => String(u || '').replace(/\/\/[^@/]*@/, '//***@');
   app.get('/proxies', async (req, reply) => {
