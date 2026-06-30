@@ -9,7 +9,7 @@ import { scheduleDay } from '../lib/schedule.js';
 import { publishArticleById, deleteArticleFromSiteById, deleteArticlesGrouped } from '../lib/publishArticle.js';
 import { htmlToBBCode } from '../lib/bbcode.js';
 import { validateBlock, bbcodeToHtml } from '../lib/linkblock.js';
-import { createJob, finishJob, getJob, withTimeout, logJob, getJobLog } from '../lib/jobs.js';
+import { createJob, finishJob, getJob, withTimeout, logJob, getJobLog, requestJobCancel, isJobCancelled } from '../lib/jobs.js';
 import { logArticleEvent, getArticleEvents } from '../lib/events.js';
 import { distributeArticles, roundRobinAccounts } from '../lib/distribute.js';
 import { submitArticleBatch, collectArticleBatch } from '../lib/batch.js';
@@ -65,7 +65,7 @@ const rankCell = (r) => {
   return `<td data-v="${r.position}" class="${cls}"><b>#${r.position}</b></td>`;
 };
 function jobBadge(s) {
-  const m = { running: ['bg-azure', 'идёт'], done: ['bg-green', 'готово'], failed: ['bg-red', 'ошибка'] };
+  const m = { running: ['bg-azure', 'идёт'], done: ['bg-green', 'готово'], failed: ['bg-red', 'ошибка'], stopped: ['bg-orange', 'остановлено'] };
   const [cls, txt] = m[s] || ['bg-secondary', s];
   return `<span class="badge ${cls} text-white">${esc(txt)}</span>`;
 }
@@ -1302,19 +1302,21 @@ ${card(`Ссылки (${links.length})`, tbl(['s2', 'бренд', 'final_url'], 
     (async () => {
       let ok = 0;
       let fail = 0;
+      let stopped = false;
+      const done = [];
       for (let i = 0; i < ids.length; i++) {
+        if (isJobCancelled(jobId)) { stopped = true; break; }
         const id = ids[i];
         logJob(jobId, `── [${i + 1}/${ids.length}] статья #${id} ──`);
         try {
           const r = await withTimeout(publishArticleById(db, id, { accountId, onStep: (m) => logJob(jobId, m) }), PUBLISH_TIMEOUT_MS, 'публикация');
-          if (r.ok) ok++;
-          else fail++;
+          if (r.ok) { ok++; done.push(id); } else fail++;
         } catch (e) {
           logJob(jobId, `сбой#${id}: ${e.message}`);
           fail++;
         }
       }
-      finishJob(jobId, { ok: fail === 0, message: `Опубликовано ${ok} из ${ids.length}${fail ? `, ошибок ${fail}` : ''}` });
+      finishJob(jobId, { ok: !stopped && fail === 0, stopped, message: `${stopped ? 'Остановлено. ' : ''}Опубликовано ${ok} из ${ids.length}${fail ? `, ошибок ${fail}` : ''}`, result: { kind: 'publish', ids: done } });
     })().catch((e) => { try { finishJob(jobId, { ok: false, message: 'Сбой задачи: ' + e.message }); } catch {} });
     reply.redirect(`/jobs/${jobId}`);
   });
@@ -1330,8 +1332,12 @@ ${card(`Ссылки (${links.length})`, tbl(['s2', 'бренд', 'final_url'], 
     const jobId = createJob('delete', {});
     logJob(jobId, `Старт: снятие с сайта ${pubIds.length} статей — группировка по аккаунту, до ${BULK_CONCURRENCY} профилей параллельно.`);
     // Группируем по аккаунту: один профиль на аккаунт, до BULK_CONCURRENCY параллельно, пауза внутри аккаунта.
-    deleteArticlesGrouped(db, pubIds, { concurrency: BULK_CONCURRENCY, delayMs: BULK_DELETE_DELAY_MS, onStep: (m) => logJob(jobId, m) })
-      .then((r) => finishJob(jobId, { ok: r.fail === 0, message: `Снято с сайта ${r.ok} из ${r.total}${r.fail ? `, ошибок ${r.fail}` : ''}` }))
+    deleteArticlesGrouped(db, pubIds, { concurrency: BULK_CONCURRENCY, delayMs: BULK_DELETE_DELAY_MS, shouldStop: () => isJobCancelled(jobId), onStep: (m) => logJob(jobId, m) })
+      .then((r) => {
+        const deletedIds = pubIds.filter((id) => db.prepare('SELECT site_deleted_at FROM articles WHERE id = ?').get(id)?.site_deleted_at);
+        const stopped = !!r.stopped;
+        finishJob(jobId, { ok: !stopped && r.fail === 0, stopped, message: `${stopped ? 'Остановлено. ' : ''}Снято с сайта ${r.ok} из ${r.total}${r.fail ? `, ошибок ${r.fail}` : ''}`, result: { kind: 'delete', ids: deletedIds } });
+      })
       .catch((e) => finishJob(jobId, { ok: false, message: e.message }));
     reply.redirect(`/jobs/${jobId}`);
   });
@@ -1374,15 +1380,33 @@ ${card(`Ссылки (${links.length})`, tbl(['s2', 'бренд', 'final_url'], 
     };
     const logText = getJobLog(j.id).map((e) => `${fmtT(e.ts)} — ${e.msg}`).join('\n');
     const logCard = card('Журнал', `<pre id="joblog" class="mono mb-0" style="max-height:55vh;overflow:auto;white-space:pre-wrap;word-break:break-word">${esc(logText) || '<span class="text-secondary">…</span>'}</pre>`);
+    const stopBtn = j.status === 'running'
+      ? `<form method="post" action="/jobs/${j.id}/cancel" class="d-inline" onsubmit="return confirm('Остановить задачу? Она завершится после текущего шага.')"><button class="btn btn-outline-danger"><i class="ti ti-player-stop"></i> Остановить</button></form>`
+      : '';
+    let resultCard = '';
+    if (j.result) {
+      try {
+        const r = JSON.parse(j.result);
+        const rids = r.ids || [];
+        if (rids.length) {
+          const hint = { publish: 'Опубликованы на сайте. Чтобы отменить — снять с сайта на странице «Статьи».', generate: 'Созданы черновики. Чтобы отменить — удалить из БД на странице «Статьи».', delete: 'Сняты с сайта (отменить нельзя — уже удалены).' }[r.kind] || '';
+          const links = rids.map((aid) => `<a href="/articles/${aid}" class="me-2 text-nowrap">#${aid}</a>`).join('');
+          resultCard = card(`<i class="ti ti-checklist"></i> Что успело выполниться (${rids.length})`, `<p class="mb-2">${esc(hint)}</p><div style="max-height:30vh;overflow:auto">${links}</div>`);
+        }
+      } catch {
+        // битый result — пропускаем
+      }
+    }
     const body = `${card('', `<p class="mb-1">Статус: <b id="jst">${esc(j.status)}</b></p><p id="jmsg" class="text-secondary mb-2">${esc(j.message || '')}</p>${progress}`)}
+${resultCard}
 ${logCard}
-<div class="d-flex flex-wrap gap-2 my-3"><a href="/sites/${j.site_id || ''}" class="btn btn-outline-secondary">К сайту</a> ${j.article_id ? `<a href="/articles/${j.article_id}" class="btn btn-primary">К статье</a>` : ''}</div>
+<div class="d-flex flex-wrap gap-2 my-3">${stopBtn}<a href="/sites/${j.site_id || ''}" class="btn btn-outline-secondary">К сайту</a> ${j.article_id ? `<a href="/articles/${j.article_id}" class="btn btn-primary">К статье</a>` : ''}</div>
 <script>
 (function(){var id=${j.id},st=document.getElementById('jst'),mg=document.getElementById('jmsg'),pr=document.getElementById('jpr'),jl=document.getElementById('joblog');
 function fmt(ts){var d=new Date(ts);function p(n){return (n<10?'0':'')+n;}return p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds());}
 function renderLog(log){if(!log||!log.length)return;jl.textContent=log.map(function(e){return fmt(e.ts)+' — '+e.msg;}).join(String.fromCharCode(10));jl.scrollTop=jl.scrollHeight;}
 function fin(s){st.textContent=s;if(pr)pr.style.display='none';}
-function poll(){fetch('/jobs/'+id+'/status',{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){st.textContent=d.status;mg.textContent=d.message||'';renderLog(d.log);if(d.status==='running'){setTimeout(poll,1500);}else{fin(d.status);}}).catch(function(){setTimeout(poll,3000);});}
+function poll(){fetch('/jobs/'+id+'/status',{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){st.textContent=d.status;mg.textContent=d.message||'';renderLog(d.log);if(d.status==='running'){setTimeout(poll,1500);}else{location.reload();}}).catch(function(){setTimeout(poll,3000);});}
 if(jl)jl.scrollTop=jl.scrollHeight;
 if('${j.status}'==='running'){poll();}
 })();
@@ -1399,6 +1423,12 @@ if('${j.status}'==='running'){poll();}
       return { error: 'not found' };
     }
     return { status: j.status, message: j.message, article_id: j.article_id, log: getJobLog(req.params.id) };
+  });
+
+  // Остановить идущую задачу (кооперативно: завершится после текущего шага). Балк-циклы проверяют флаг между элементами.
+  app.post('/jobs/:id/cancel', async (req, reply) => {
+    const ok = requestJobCancel(req.params.id);
+    reply.redirect(`/jobs/${req.params.id}?msg=${encodeURIComponent(ok ? 'Остановка запрошена — задача завершится после текущего шага.' : 'Задача уже не выполняется.')}`);
   });
 
   // ============================ Планировщик ============================
@@ -1907,19 +1937,23 @@ ${dScript}`;
     (async () => {
       let ok = 0;
       let fail = 0;
+      let stopped = false;
+      const done = [];
       for (let i = 0; i < items.length; i++) {
+        if (isJobCancelled(jobId)) { stopped = true; break; }
         const it = items[i];
         logJob(jobId, `── [${i + 1}/${items.length}] ключ «${it.phrase}» ──`);
         try {
           const res = await withTimeout(generateArticleForSite(db, { siteId: prompt.site_id, promptId: prompt.id, keyword: it.phrase, backend, onStep: (m) => logJob(jobId, m) }), 300000, 'генерация');
           linkItemArticle(db, it.id, res.id);
           ok++;
+          done.push(res.id);
         } catch (e) {
           logJob(jobId, `сбой «${it.phrase}»: ${e.message}`);
           fail++;
         }
       }
-      finishJob(jobId, { ok: fail === 0, message: `Сгенерировано ${ok} из ${items.length}${fail ? `, ошибок ${fail}` : ''}` });
+      finishJob(jobId, { ok: !stopped && fail === 0, stopped, message: `${stopped ? 'Остановлено. ' : ''}Сгенерировано ${ok} из ${items.length}${fail ? `, ошибок ${fail}` : ''}`, result: { kind: 'generate', ids: done } });
     })().catch((e) => { try { finishJob(jobId, { ok: false, message: 'Сбой задачи: ' + e.message }); } catch {} });
     reply.redirect(`/jobs/${jobId}`);
   });
@@ -2299,8 +2333,12 @@ ${e.site_id ? `<form method="post" action="/email-accounts/${e.id}/release" titl
     (async () => {
       let approved = 0;
       let fail = 0;
+      let stopped = false;
+      let checked = 0;
       for (let i = 0; i < ids.length; i++) {
+        if (isJobCancelled(jobId)) { stopped = true; break; }
         const regId = ids[i];
+        checked += 1;
         logJob(jobId, `── [${i + 1}/${ids.length}] регистрация #${regId} ──`);
         try {
           const res = await withTimeout(checkApproval(db, { registrationId: regId, onStep: (m) => logJob(jobId, m) }), PUBLISH_TIMEOUT_MS, 'проверка одобрения');
@@ -2310,7 +2348,7 @@ ${e.site_id ? `<form method="post" action="/email-accounts/${e.id}/release" titl
           fail += 1;
         }
       }
-      finishJob(jobId, { ok: fail === 0, message: `Проверено ${ids.length}, одобрено ${approved}${fail ? `, ошибок ${fail}` : ''}` });
+      finishJob(jobId, { ok: !stopped && fail === 0, stopped, message: `${stopped ? 'Остановлено. ' : ''}Проверено ${checked} из ${ids.length}, одобрено ${approved}${fail ? `, ошибок ${fail}` : ''}` });
     })().catch((e) => { try { finishJob(jobId, { ok: false, message: 'Сбой задачи: ' + e.message }); } catch {} });
     reply.redirect(`/jobs/${jobId}`);
   });
