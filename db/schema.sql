@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS prompts (
   content       TEXT    NOT NULL,
   link_block    TEXT,                               -- авторский блок ссылок (BBCode)
   link_position TEXT,                               -- куда вставлять блок: start|1|2|3|end (по умолч. 1)
+  stop_words    TEXT,                               -- стоп-слова (запятая/строки): если попали в статью — перегенерация
   tags          TEXT,                               -- теги через запятую (для article[tag_name_list])
   active        INTEGER NOT NULL DEFAULT 1,
   hidden        INTEGER NOT NULL DEFAULT 0,          -- скрыт из списков (мягкое удаление; статьи по нему не ломаются)

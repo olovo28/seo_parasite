@@ -41,6 +41,7 @@ function migrate(db) {
   ensureColumn(db, 'prompts', 'link_block', 'TEXT');
   ensureColumn(db, 'prompts', 'tags', 'TEXT');
   ensureColumn(db, 'prompts', 'link_position', 'TEXT');
+  ensureColumn(db, 'prompts', 'stop_words', 'TEXT'); // стоп-слова (через запятую/строки) — при генерации не должны попадать в статью
   ensureColumn(db, 'sites', 'daily_limit', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn(db, 'sites', 'timezone', "TEXT NOT NULL DEFAULT 'Europe/Vienna'");
   ensureColumn(db, 'articles', 'site_deleted_at', 'TEXT');

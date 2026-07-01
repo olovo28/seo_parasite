@@ -702,6 +702,7 @@ ${acc.cookies_updated_at ? `<form method="post" action="/site-accounts/${acc.id}
 <textarea name="content" class="form-control" rows="7" placeholder="Напиши статью на немецком про ...">${esc(p.content || '')}</textarea>
 <div class="form-text">Для генерации по списку вставь <code>{{KEYWORD}}</code> там, где должен быть целевой ключ (напр. «…о теме <code>{{KEYWORD}}</code>…»). При генерации он заменится на ключ; без плейсхолдера ключ допишется инструкцией в конец.</div></div>
 <div class="row g-2 mb-3"><div class="col-md-5"><label class="form-label">Теги (через запятую, ≥2)</label><input name="tags" class="form-control" value="${esc(p.tags || '')}" placeholder="Information, Informationsabend"></div><div class="col-md-7"><label class="form-label">Позиции блока ссылок <span class="text-secondary fw-normal small">(1–4, можно несколько — блок продублируется)</span></label><div class="d-flex flex-wrap gap-2 pt-1">${posChecks}</div></div></div>
+<div class="mb-3"><label class="form-label">Стоп-слова <span class="text-secondary fw-normal small">(через запятую или строками — если попадут в статью, будет авто-перегенерация)</span></label><textarea name="stop_words" class="form-control" rows="2" placeholder="Casino, Wetten, spielen">${esc(p.stop_words || '')}</textarea></div>
 <div class="d-flex align-items-center flex-wrap gap-2 mb-1"><label class="form-label mb-0">Блок ссылок (BBCode)</label><span id="lbstatus" class="badge bg-secondary" title="">—</span><button type="button" id="lbhelpbtn" class="btn btn-sm btn-outline-secondary" title="Как форматировать блок">?</button></div>
 <div id="lbhelp" class="d-none alert alert-info small">${helpHtml}</div>
 <div class="mb-1 small text-secondary d-flex flex-wrap align-items-center gap-1"><span class="me-1">Вставить:</span><span id="tpltags"></span><span id="tplsnip"></span><span id="emo"></span></div>
@@ -747,8 +748,8 @@ var lppos=document.querySelectorAll('.lppos');function lpcap(e){var n=0;lppos.fo
       .map((s) => String(s).trim())
       .filter(Boolean);
     const lp = posList.length ? posList.slice(0, 4).join(',') : '1';
-    db.prepare('UPDATE prompts SET name=@name, content=@content, link_block=@lb, tags=@tags, link_position=@lp WHERE id=@id')
-      .run({ id: Number(req.params.id), name: b.name || null, content: b.content || '', lb: b.link_block || null, tags: b.tags || null, lp });
+    db.prepare('UPDATE prompts SET name=@name, content=@content, link_block=@lb, tags=@tags, link_position=@lp, stop_words=@sw WHERE id=@id')
+      .run({ id: Number(req.params.id), name: b.name || null, content: b.content || '', lb: b.link_block || null, tags: b.tags || null, lp, sw: b.stop_words || null });
     reply.redirect(`/prompts/${req.params.id}?msg=${encodeURIComponent('Сохранено')}`);
   });
   app.post('/prompts/:id/activate', async (req, reply) => {
