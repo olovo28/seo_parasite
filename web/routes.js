@@ -29,6 +29,7 @@ import { registerOnSite, checkApproval, MAX_APPROVAL_CHECKS } from '../lib/regis
 import { startWarming } from '../lib/warming.js';
 import { generateIdentity } from '../lib/identity.js';
 import { getRegEvents, recentRegEvents, logRegEvent } from '../lib/regEvents.js';
+import { FARM_FIELDS, getFarmConfig } from '../lib/farmConfig.js';
 import { mailProviderList } from '../lib/mail/index.js';
 import { createMailbox } from '../lib/mailRegistrar.js';
 import { getSmsProvider } from '../lib/sms/index.js';
@@ -998,9 +999,35 @@ var lppos=document.querySelectorAll('.lppos');function lpcap(e){var n=0;lppos.fo
 <button type="submit" class="btn btn-primary">Добавить</button></form></div></details>`;
     const keysCard = `<div class="card"><div class="card-header"><h3 class="card-title"><i class="ti ti-robot"></i> Ключи Claude</h3></div><div class="table-responsive"><table class="table table-vcenter card-table"><thead><tr><th>id</th><th>акт.</th><th>ключ</th><th>label</th><th>last used</th><th></th></tr></thead><tbody>${tr || '<tr><td colspan="6" class="text-secondary">нет</td></tr>'}</tbody></table></div><div class="card-footer">${addKey}</div></div>`;
 
-    reply.type('text/html').send(page('/settings', 'Настройки', settingsCard + keysCard, { flash: flash(req.query) }));
+    // Настройки фарма (прогрев / человечность регистрации / отпечаток Dolphin-профиля).
+    const fcfg = getFarmConfig(db);
+    const fgroups = {};
+    for (const f of FARM_FIELDS) (fgroups[f.group] ||= []).push(f);
+    const farmBody = Object.entries(fgroups)
+      .map(([g, fs]) => `<h4 class="mt-3 mb-2">${esc(g)}</h4><div class="row g-3">${fs
+        .map((f) => {
+          let input;
+          if (f.type === 'bool') input = `<label class="form-check mt-1"><input type="checkbox" name="farm_${f.key}" value="1" class="form-check-input"${fcfg[f.key] ? ' checked' : ''}> <span class="form-check-label">вкл</span></label>`;
+          else if (f.type === 'enum') input = `<select name="farm_${f.key}" class="form-select">${f.opts.map((o) => `<option${o === fcfg[f.key] ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
+          else input = `<input type="number" name="farm_${f.key}" value="${esc(String(fcfg[f.key]))}" class="form-control">`;
+          return `<div class="col-md-4"><label class="form-label mb-1 small">${esc(f.label)}</label>${input}</div>`;
+        })
+        .join('')}</div>`)
+      .join('');
+    const farmCard = card('<i class="ti ti-flame"></i> Настройки фарма <span class="text-secondary fw-normal small">(прогрев · регистрация · профиль Dolphin)</span>', `<div class="text-secondary small mb-2">Применяются к новым визитам/регистрациям и новым профилям сразу (без перезапуска).</div><form id="farm" method="post" action="/farm-settings">${farmBody}<button type="submit" class="btn btn-primary mt-3">Сохранить</button></form>`);
+
+    reply.type('text/html').send(page('/settings', 'Настройки', settingsCard + farmCard + keysCard, { flash: flash(req.query) }));
   });
   app.get('/keys', async (req, reply) => reply.redirect('/settings'));
+  app.post('/farm-settings', async (req, reply) => {
+    for (const f of FARM_FIELDS) {
+      const name = 'farm_' + f.key;
+      const v = f.type === 'bool' ? (req.body[name] ? '1' : '0') : String(req.body[name] ?? '').trim();
+      if (f.type !== 'bool' && v === '') continue; // пусто — не менять
+      setSetting(db, 'farm.' + f.key, v);
+    }
+    reply.redirect(`/settings?msg=${encodeURIComponent('Настройки фарма сохранены')}#farm`);
+  });
 
   app.post('/settings', async (req, reply) => {
     for (const [key, def] of Object.entries(KNOWN_SETTINGS)) {
