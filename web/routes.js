@@ -1719,15 +1719,13 @@ if('${j.status}'==='running'){poll();}
     const warmRows = regWarm
       .map((r) => `<tr><td>${r.id}</td><td>${esc(r.site_name)}</td><td>${esc(r.email)}</td><td>${r.warm_visits || 0}/${r.warm_target || '?'}</td><td class="text-secondary" style="white-space:nowrap">${r.next_warm_at ? esc(fmtInTz(r.next_warm_at, 'UTC')) + ' UTC' : '—'}</td><td class="text-secondary">${r.next_warm_at ? relFromNow(r.next_warm_at) : ''}</td></tr>`)
       .join('');
-    const warmCard = regWarm.length
-      ? tableCard(
-          `<i class="ti ti-flame"></i> Прогрев аккаунтов (${regWarm.length})`,
-          ['id', 'сайт', 'почта', 'визитов', 'следующий визит', 'через'],
-          warmRows,
-          'warmq',
-          '<div class="text-secondary small">Человеческие визиты на сайт по расписанию (нерегулярно); по достижении цели — авто-регистрация.</div>',
-        )
-      : '';
+    const warmCard = tableCard(
+      `<i class="ti ti-flame"></i> Прогрев аккаунтов (${regWarm.length})`,
+      ['id', 'сайт', 'почта', 'визитов', 'следующий визит', 'через'],
+      warmRows || '<tr><td colspan="6" class="text-secondary">никого не прогреваем — запусти «Прогреть, затем зарегистрировать» на странице сайта</td></tr>',
+      'warmq',
+      '<div class="text-secondary small">Человеческие визиты на сайт по расписанию (нерегулярно); по достижении цели — авто-регистрация.</div>',
+    );
 
     // Недавняя активность регистраций/прогрева (журнал событий по всем сайтам).
     const regActs = recentRegEvents(db, 25);
