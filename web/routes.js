@@ -30,7 +30,7 @@ import { startWarming, warmVisit } from '../lib/warming.js';
 import { generateIdentity } from '../lib/identity.js';
 import { getRegEvents, recentRegEvents, logRegEvent } from '../lib/regEvents.js';
 import { FARM_FIELDS, getFarmConfig } from '../lib/farmConfig.js';
-import { mailProviderList } from '../lib/mail/index.js';
+import { mailProviderList, providerForEmail, countryForEmail } from '../lib/mail/index.js';
 import { createMailbox } from '../lib/mailRegistrar.js';
 import { getSmsProvider } from '../lib/sms/index.js';
 import { collectArticleStats, collectStatsForSite, keywordStats, articleStatsRows, articleLatestStats } from '../lib/stats.js';
@@ -666,21 +666,21 @@ ${acc.cookies_updated_at ? `<form method="post" action="/site-accounts/${acc.id}
         return back(`Аккаунт ${email} добавлен как активный (уже одобрен).`);
       }
       // Не одобрен → почта в пул + регистрация awaiting_admin для IMAP-проверки одобрения.
-      const dom = (email.split('@')[1] || '').toLowerCase();
-      const provider = /web\.de$/.test(dom) ? 'webde' : /mail\.com$/.test(dom) ? 'mailcom' : 'gmx';
+      const provider = providerForEmail(email, 'gmx'); // по домену: gmx.de→gmxde, gmx.ch→gmxch, gmx.net→gmxnet, web.de→webde…
+      const ctry = countryForEmail(email, 'at'); // страна прокси по домену (gmx.de→de, gmx.ch→ch), иначе at
       let ea = db.prepare('SELECT * FROM email_accounts WHERE email = ?').get(email);
       if (!ea) {
-        // country='at' → addEmailAccount сам выдаст AT-прокси из пула, если прокси не задана (для IMAP GMX нужна AT-прокси).
-        addEmailAccount(db, { provider, email, password: emailPw, proxy: proxy || undefined, country: 'at' });
+        // если прокси не задана — addEmailAccount сам выдаст её из пула нужной страны (для IMAP GMX нужен IP «своей» страны).
+        addEmailAccount(db, { provider, email, password: emailPw, proxy: proxy || undefined, country: ctry });
         ea = db.prepare('SELECT * FROM email_accounts WHERE email = ?').get(email);
       } else {
         db.prepare('UPDATE email_accounts SET password = ?, proxy = COALESCE(?, proxy) WHERE id = ?').run(emailPw, proxy, ea.id);
       }
-      // если у почты всё ещё нет прокси — выдаём из пула (иначе IMAP GMX отклонит логин с чужого IP).
+      // если у почты всё ещё нет прокси — выдаём из пула нужной страны (иначе IMAP GMX отклонит логин с чужого IP).
       const cur = db.prepare('SELECT proxy FROM email_accounts WHERE id = ?').get(ea.id);
       if (!cur.proxy) {
-        const p = assignProxy(db, { country: 'at', purpose: 'register' });
-        if (p) db.prepare("UPDATE email_accounts SET proxy = ?, country = 'at' WHERE id = ?").run(p, ea.id);
+        const p = assignProxy(db, { country: ctry, purpose: 'register' });
+        if (p) db.prepare('UPDATE email_accounts SET proxy = ?, country = ? WHERE id = ?').run(p, ctry, ea.id);
       }
       db.prepare('UPDATE email_accounts SET site_id = ? WHERE id = ?').run(id, ea.id); // одна почта = один сайт
       let reg = getRegistrationByEmail(db, ea.id);
