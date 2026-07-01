@@ -23,7 +23,7 @@ import { isDolphinRunning } from '../lib/dolphin.js';
 import { adapterList, getAdapter } from '../lib/sites/index.js';
 import { EU_TZ, zonedToEpoch, epochToZoned, utcStamp, parseStamp, fmtInTz, nextDailyOccurrence } from '../lib/time.js';
 import { listEmailAccounts, freeEmailAccounts, addEmailAccount, importEmailAccounts, toggleEmailAccount, removeEmailAccount, clearEmailCookies, releaseEmail } from '../lib/emailAccounts.js';
-import { importProxies, listGroups, getGroup, createGroup, updateGroup, deleteGroup, setProxiesGroup, PROXY_PURPOSES } from '../lib/proxyPool.js';
+import { importProxies, listGroups, getGroup, createGroup, updateGroup, deleteGroup, setProxiesGroup, assignProxy, PROXY_PURPOSES } from '../lib/proxyPool.js';
 import { listRegistrations, createRegistration, getRegistration, getRegistrationByEmail, updateRegistration } from '../lib/registrations.js';
 import { registerOnSite, checkApproval, MAX_APPROVAL_CHECKS } from '../lib/registrar.js';
 import { startWarming } from '../lib/warming.js';
@@ -670,10 +670,17 @@ ${acc.cookies_updated_at ? `<form method="post" action="/site-accounts/${acc.id}
       const provider = /web\.de$/.test(dom) ? 'webde' : /mail\.com$/.test(dom) ? 'mailcom' : 'gmx';
       let ea = db.prepare('SELECT * FROM email_accounts WHERE email = ?').get(email);
       if (!ea) {
-        addEmailAccount(db, { provider, email, password: emailPw, proxy: proxy || undefined });
+        // country='at' → addEmailAccount сам выдаст AT-прокси из пула, если прокси не задана (для IMAP GMX нужна AT-прокси).
+        addEmailAccount(db, { provider, email, password: emailPw, proxy: proxy || undefined, country: 'at' });
         ea = db.prepare('SELECT * FROM email_accounts WHERE email = ?').get(email);
       } else {
         db.prepare('UPDATE email_accounts SET password = ?, proxy = COALESCE(?, proxy) WHERE id = ?').run(emailPw, proxy, ea.id);
+      }
+      // если у почты всё ещё нет прокси — выдаём из пула (иначе IMAP GMX отклонит логин с чужого IP).
+      const cur = db.prepare('SELECT proxy FROM email_accounts WHERE id = ?').get(ea.id);
+      if (!cur.proxy) {
+        const p = assignProxy(db, { country: 'at', purpose: 'register' });
+        if (p) db.prepare("UPDATE email_accounts SET proxy = ?, country = 'at' WHERE id = ?").run(p, ea.id);
       }
       db.prepare('UPDATE email_accounts SET site_id = ? WHERE id = ?').run(id, ea.id); // одна почта = один сайт
       let reg = getRegistrationByEmail(db, ea.id);
