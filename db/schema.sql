@@ -275,6 +275,16 @@ CREATE TABLE IF NOT EXISTS site_registrations (
 CREATE INDEX IF NOT EXISTS idx_site_registrations ON site_registrations(status, next_check_at);
 CREATE INDEX IF NOT EXISTS idx_site_registrations_site ON site_registrations(site_id, id);
 
+-- Журнал событий регистрации/прогрева (вехи: warm_start/warm_visit/submitted/awaiting_admin/approved/…) — история в UI.
+CREATE TABLE IF NOT EXISTS registration_events (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  registration_id INTEGER NOT NULL REFERENCES site_registrations(id) ON DELETE CASCADE,
+  ts              TEXT    NOT NULL,                 -- UTC (utcStamp)
+  kind            TEXT,                             -- warm_start | warm_visit | warm_done | submitted | awaiting_admin | approval_check | approved | failed | banned | …
+  message         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_registration_events ON registration_events(registration_id, id);
+
 -- Пул прокси для СОЗДАНИЯ ящиков (импорт из AT-1.txt). «Свободная» = не закреплена ни за одной почтой
 -- (email_accounts.proxy). Контейнер не видит reference/ (.dockerignore) — поэтому пул живёт в БД.
 CREATE TABLE IF NOT EXISTS proxies (

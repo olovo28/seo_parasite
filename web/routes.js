@@ -28,6 +28,7 @@ import { listRegistrations, createRegistration, getRegistration, getRegistration
 import { registerOnSite, checkApproval, MAX_APPROVAL_CHECKS } from '../lib/registrar.js';
 import { startWarming } from '../lib/warming.js';
 import { generateIdentity } from '../lib/identity.js';
+import { getRegEvents, recentRegEvents, logRegEvent } from '../lib/regEvents.js';
 import { mailProviderList } from '../lib/mail/index.js';
 import { createMailbox } from '../lib/mailRegistrar.js';
 import { getSmsProvider } from '../lib/sms/index.js';
@@ -486,7 +487,7 @@ ${acc.cookies_updated_at ? `<form method="post" action="/site-accounts/${acc.id}
 <td class="text-secondary small" style="white-space:nowrap">${r.approved_at ? esc(fmtInTz(r.approved_at, 'UTC')) : '—'}</td>
 <td class="text-secondary small" style="white-space:nowrap">${r.last_checked_at ? esc(fmtInTz(r.last_checked_at, 'UTC')) + (r.checks ? ` <span class="text-secondary">(${r.checks})</span>` : '') : '—'}</td>
 <td class="text-secondary small">${r.status === 'warming' ? `визит ${r.warm_visits || 0}/${r.warm_target || '?'}${r.next_warm_at ? ' · дальше ' + esc(fmtInTz(r.next_warm_at, 'UTC')) : ''}` : esc((r.error || '').slice(0, 60))}</td>
-<td><div class="d-flex gap-1">${check}${reopen}${retry}</div></td></tr>`;
+<td><div class="d-flex gap-1">${check}${reopen}${retry}<a href="/registrations/${r.id}" class="btn btn-sm btn-outline-secondary" title="журнал событий">журнал</a></div></td></tr>`;
       })
       .join('');
     const selectAllCb = anyAwaiting ? `<input class="form-check-input m-0" type="checkbox" title="выбрать все «ждём одобрения»" onclick="var on=this.checked;document.querySelectorAll('input[name=regs]').forEach(function(c){c.checked=on});">` : '';
@@ -680,6 +681,7 @@ ${acc.cookies_updated_at ? `<form method="post" action="/site-accounts/${acc.id}
         reg = getRegistration(db, rid);
       }
       updateRegistration(db, reg.id, { status: 'awaiting_admin', site_username: email, site_password: accPw, confirm_url: 'manual', submitted_at: utcStamp(), next_check_at: utcStamp(), checks: 0, error: null });
+      logRegEvent(db, reg.id, 'created', 'Аккаунт добавлен вручную — ожидаем одобрения (IMAP-проверка).');
       return back(`Аккаунт ${email} добавлен — ждёт одобрения, доступна проверка по IMAP («Регистрации»).`);
     } catch (e) {
       return back('Ошибка: ' + e.message);
@@ -1700,8 +1702,15 @@ if('${j.status}'==='running'){poll();}
         )
       : '';
 
+    // Недавняя активность регистраций/прогрева (журнал событий по всем сайтам).
+    const regActs = recentRegEvents(db, 25);
+    const regActRows = regActs
+      .map((e) => `<tr><td class="text-secondary" style="white-space:nowrap">${esc(fmtInTz(e.ts, 'UTC'))} UTC</td><td><a href="/registrations/${e.registration_id}">#${e.registration_id}</a></td><td class="text-secondary small">${esc(e.email)}</td><td><span class="badge bg-secondary text-white">${esc(e.kind)}</span></td><td>${esc(e.message || '')}</td></tr>`)
+      .join('');
+    const regActCard = tableCard('<i class="ti ti-user-check"></i> Недавняя активность регистраций/прогрева', ['время', 'рег.', 'почта', 'событие', 'текст'], regActRows, 'regacts');
+
     const refresh = '<script>setTimeout(function(){location.reload();},15000);</script>';
-    reply.type('text/html').send(page('/scheduler', 'Планировщик', statusCard + pubCard + delCard + warmCard + regCard + actCard + refresh));
+    reply.type('text/html').send(page('/scheduler', 'Планировщик', statusCard + pubCard + delCard + warmCard + regCard + regActCard + actCard + refresh));
   });
 
   // ============================ Макеты управления статьями (черновик дизайна) ============================
@@ -2602,7 +2611,32 @@ ${e.site_id ? `<form method="post" action="/email-accounts/${e.id}/release" titl
     if (!reg) return reply.redirect(`/sites/?msg=${encodeURIComponent('Регистрация не найдена')}`);
     if (!reg.confirm_url) return reply.redirect(`/sites/${reg.site_id}?tab=settings&msg=${encodeURIComponent('Нельзя вернуть в проверку: регистрация не прошла подтверждение — используй «повторить».')}#registration`);
     db.prepare("UPDATE site_registrations SET status = 'awaiting_admin', checks = 0, next_check_at = datetime('now'), error = NULL, updated_at = datetime('now') WHERE id = ?").run(regId);
+    logRegEvent(db, regId, 'reopened', 'Возвращена в проверку одобрения (сброс счётчика).');
     reply.redirect(`/sites/${reg.site_id}?tab=settings&msg=${encodeURIComponent('Возвращена в проверку одобрения — опрос почты возобновлён.')}#registration`);
+  });
+  // Журнал событий одной регистрации (история: прогрев/форма/одобрение).
+  app.get('/registrations/:id', async (req, reply) => {
+    const reg = getRegistration(db, req.params.id);
+    if (!reg) return reply.code(404).type('text/html').send('Регистрация не найдена');
+    const email = db.prepare('SELECT email, provider, proxy FROM email_accounts WHERE id = ?').get(reg.email_account_id) || {};
+    const site = db.prepare('SELECT id, name FROM sites WHERE id = ?').get(reg.site_id) || {};
+    const RU = { warming: 'прогрев', pending: 'в очереди', mail_login_failed: 'почта недоступна', submitted: 'форма отправлена', confirm_failed: 'нет подтверждения', awaiting_admin: 'ждём одобрения', approved: 'одобрено', rejected: 'отклонено', failed: 'ошибка' };
+    const stColor = { approved: 'bg-green', awaiting_admin: 'bg-azure', submitted: 'bg-azure', warming: 'bg-cyan', pending: 'bg-secondary', failed: 'bg-red', mail_login_failed: 'bg-red', confirm_failed: 'bg-orange' };
+    const statusBadge = (s) => `<span class="badge ${stColor[s] || 'bg-secondary'} text-white">${esc(RU[s] || s)}</span>`;
+    const evColor = { warm_start: 'bg-cyan', warm_visit: 'bg-cyan', warm_done: 'bg-teal', submitted: 'bg-azure', awaiting_admin: 'bg-azure', approval_check: 'bg-secondary', approved: 'bg-green', failed: 'bg-red', banned: 'bg-red', created: 'bg-secondary', reopened: 'bg-orange' };
+    const evBadge = (k) => `<span class="badge ${evColor[k] || 'bg-secondary'} text-white">${esc(k)}</span>`;
+    const evs = getRegEvents(db, reg.id);
+    const evRows = evs.length
+      ? evs.map((e) => `<tr><td class="text-secondary" style="white-space:nowrap">${esc(fmtInTz(e.ts, 'UTC'))} UTC</td><td>${evBadge(e.kind)}</td><td>${esc(e.message || '')}</td></tr>`).join('')
+      : '<tr><td colspan="3" class="text-secondary">событий ещё нет</td></tr>';
+    const info = `<div class="row g-3 mb-3">
+<div class="col-auto">почта: <b>${esc(email.email || '—')}</b> <span class="text-secondary small">${esc(email.provider || '')}</span></div>
+<div class="col-auto">статус: ${statusBadge(reg.status)}</div>
+<div class="col-auto">имя: ${esc(reg.identity?.name || '—')}</div>
+${reg.status === 'warming' ? `<div class="col-auto">визитов: <b>${reg.warm_visits || 0}/${reg.warm_target || '?'}</b> · дальше ${reg.next_warm_at ? esc(fmtInTz(reg.next_warm_at, 'UTC')) + ' UTC' : '—'}</div>` : ''}
+${reg.status === 'awaiting_admin' ? `<div class="col-auto">проверок: <b>${reg.checks || 0}/${MAX_APPROVAL_CHECKS}</b> · следующая ${reg.next_check_at ? esc(fmtInTz(reg.next_check_at, 'UTC')) + ' UTC' : '—'}</div>` : ''}</div>`;
+    const content = `<div class="mb-2"><a href="/sites/${site.id}?tab=settings#registration" class="btn btn-link btn-sm">&larr; ${esc(site.name || 'Сайт')}</a></div>${info}<div class="card"><div class="table-responsive"><table class="table table-vcenter card-table"><thead><tr><th>время</th><th>событие</th><th>текст</th></tr></thead><tbody>${evRows}</tbody></table></div></div>`;
+    reply.type('text/html').send(page('/sites', `Регистрация #${reg.id} — ${email.email || ''}`, content, { flash: flash(req.query) }));
   });
   // Массовая проверка одобрения по IMAP: одна задача, регистрации проверяются последовательно
   // (IMAP без Dolphin; на отказ прокси registrar сам меняет её на свободную из пула).

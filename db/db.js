@@ -79,6 +79,13 @@ function migrate(db) {
   ensureColumn(db, 'site_registrations', 'warm_target', 'INTEGER'); // сколько визитов запланировано (дней прогрева)
   ensureColumn(db, 'site_registrations', 'next_warm_at', 'TEXT'); // когда следующий визит прогрева (планировщик)
   ensureColumn(db, 'site_registrations', 'warm_cookies', 'TEXT'); // сохранённая сессия сайта между визитами (returning visitor)
+  // Журнал событий регистрации/прогрева (история на /registrations/:id) — как article_events у статей.
+  db.exec(`CREATE TABLE IF NOT EXISTS registration_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    registration_id INTEGER NOT NULL REFERENCES site_registrations(id) ON DELETE CASCADE,
+    ts TEXT NOT NULL, kind TEXT, message TEXT
+  )`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_registration_events ON registration_events(registration_id, id)');
   // Блоки ссылок отдельной сущностью: таблица + связи + перенос инлайн-блоков промтов (идемпотентно).
   ensureColumn(db, 'prompts', 'link_block_id', 'INTEGER'); // выбранный блок ссылок (link_blocks.id)
   ensureColumn(db, 'articles', 'link_block_id', 'INTEGER'); // какой блок подставить при публикации
