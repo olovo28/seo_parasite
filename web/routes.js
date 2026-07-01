@@ -123,6 +123,14 @@ function renderArticlesWorkspace(db, { fixedSiteId = null, from = '/articles' } 
     .prepare(`SELECT a.id, a.site_id, a.status, a.category, a.keyword, a.title, a.scheduled_at, a.published_at, a.generated_at, a.site_url, a.delete_at, a.no_auto_delete, a.site_deleted_at, a.account_id, acc.label AS acc_label, acc.username AS acc_username, s.name AS site_name FROM articles a LEFT JOIN sites s ON s.id = a.site_id LEFT JOIN site_accounts acc ON acc.id = a.account_id${where} ORDER BY a.id DESC LIMIT 200`)
     .all(fixedSiteId ? { site: Number(fixedSiteId) } : {});
 
+  // Последняя позиция в Google по каждой статье и стране (для карточки): { [articleId]: { at:{position}, de, ch } }.
+  const rankByArticle = {};
+  for (const r of db
+    .prepare(`SELECT r.article_id, r.country, r.position FROM article_ranks r JOIN (SELECT article_id, country, MAX(id) mid FROM article_ranks GROUP BY article_id, country) x ON x.mid = r.id`)
+    .all()) {
+    (rankByArticle[r.article_id] ||= {})[r.country] = r;
+  }
+
   const siteIds = fixedSiteId ? [Number(fixedSiteId)] : [...new Set(rows.map((r) => r.site_id))];
   const accBySite = {};
   const tzBySite = {};
@@ -260,6 +268,19 @@ function renderArticlesWorkspace(db, { fixedSiteId = null, from = '/articles' } 
     if (a.status === 'published') return `<span class="text-success">На сайте</span> с ${esc(fmtInTz(a.published_at, ztz))}` + (a.delete_at ? ` · <span class="text-warning">удалится ${esc(fmtInTz(a.delete_at, ztz))}</span> <span class="text-secondary small">(${rel(a.delete_at)})</span>` : a.no_auto_delete ? ' · <span class="text-secondary">не удалять</span>' : ' · авто-удаление не задано');
     return '';
   };
+  // Позиции в Google (последняя проверка) — на карточке, если статью уже проверяли по её ключу.
+  const rankLine = (a) => {
+    const rk = rankByArticle[a.id];
+    if (!rk) return '';
+    const parts = ['at', 'de', 'ch']
+      .filter((c) => rk[c])
+      .map((c) => {
+        const p = rk[c].position;
+        const cls = p == null ? 'text-secondary' : p <= 10 ? 'text-success fw-bold' : p <= 30 ? 'text-warning' : 'text-secondary';
+        return `<span class="${cls}">${c.toUpperCase()} ${p == null ? 'вне топа' : '#' + p}</span>`;
+      });
+    return parts.length ? `<div class="small mb-2" title="позиция в органике Google по ключу (последняя проверка)"><i class="ti ti-chart-line"></i> Google: ${parts.join(' · ')}</div>` : '';
+  };
   const statusCell = (a) => (a.status === 'published' && a.site_deleted_at ? '<span class="badge bg-secondary text-white">архив</span>' : badge(a.status));
   // Инлайн-кнопки действий (раньше прятались под «⋮» — места хватает, выводим всё сразу).
   const unschedBtn = (a) => `<form method="post" action="/articles/unschedule"><input type="hidden" name="ids" value="${a.id}"><input type="hidden" name="from" value="${esc(from)}"><button class="btn btn-sm btn-outline-secondary" title="Вернуть в черновики, убрать время">↩ Снять с расписания</button></form>`;
@@ -299,6 +320,7 @@ ${a.keyword ? `<div class="mb-1"><span class="badge bg-yellow text-dark kwcopy" 
 <div class="small text-secondary mb-2"><i class="ti ti-sparkles"></i> сген.: ${esc(fmtInTz(a.generated_at, ztz))}</div>
 ${acctLine(a)}
 <div class="small mb-3">${stateLine(a)}</div>
+${rankLine(a)}
 ${editor}
 </div>
 <div class="card-footer py-2"><div class="d-flex flex-wrap gap-1 align-items-center">${f.join('')}</div></div>
