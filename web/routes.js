@@ -509,7 +509,7 @@ ${acc.cookies_updated_at ? `<form method="post" action="/site-accounts/${acc.id}
 <td><div class="d-flex gap-1"><a href="/prompts/${p.id}" class="btn btn-sm btn-outline-secondary">ред.</a>${hidden ? `<form method="post" action="/prompts/${p.id}/unhide"><button class="btn btn-sm btn-outline-success">вернуть</button></form>` : `<form method="post" action="/prompts/${p.id}/delete" onsubmit="return confirm('Скрыть промт из списка? (статьи по нему не пострадают)')"><button class="btn btn-sm btn-outline-danger">скрыть</button></form>`}</div></td></tr>`;
     };
     const promptRows = visiblePrompts.map((p) => promptRow(p, false)).join('') + hiddenPrompts.map((p) => promptRow(p, true)).join('');
-    const promptsFooter = `<div class="d-flex flex-wrap gap-2 align-items-center"><form method="post" action="/prompts"><input type="hidden" name="site" value="${id}"><button type="submit" class="btn btn-primary">+ Новый промт</button></form><a href="/sites/${id}?tab=generate&showHidden=${showHidden ? '0' : '1'}#prompts" class="btn btn-link btn-sm">${showHidden ? 'скрыть архивные' : 'показать скрытые'}</a></div>`;
+    const promptsFooter = `<div class="d-flex flex-wrap gap-2 align-items-center"><form method="post" action="/prompts"><input type="hidden" name="site" value="${id}"><button type="submit" class="btn btn-primary">+ Новый промт</button></form><a href="/sites/${id}?tab=generate&showHidden=${showHidden ? '0' : '1'}#prompts" class="btn btn-link btn-sm">${showHidden ? 'скрыть архивные' : 'показать скрытые'}</a><a href="/sites/${id}/prompt-stats" class="btn btn-link btn-sm"><i class="ti ti-chart-bar"></i> Сравнение промтов по ключам</a></div>`;
     const promptsCard = tableCard('<i class="ti ti-edit"></i> Промты', ['id', 'название', 'блок ссылок', 'теги', ''], promptRows, 'prompts', promptsFooter);
 
     // --- статьи сайта (полная рабочая область: распределение + публикация построчно/балком) ---
@@ -758,6 +758,52 @@ if(ta){ta.addEventListener('input',function(){check();preview();});check();previ
 var lppos=document.querySelectorAll('.lppos');function lpcap(e){var n=0;lppos.forEach(function(c){if(c.checked)n++;});if(n>4&&e&&e.target){e.target.checked=false;alert('Не больше 4 позиций блока ссылок.');}}lppos.forEach(function(c){c.addEventListener('change',lpcap);});})();
 </script>`;
     reply.type('text/html').send(layout('/sites', form + script, { title: p.name || `Промт ${p.id}`, navLeft, flash: flash(req.query) }));
+  });
+
+  // Сравнение промтов по ключам: какой промт лучше «зашёл» (просмотры/органика/позиция) — для A/B промтов на ключе.
+  app.get('/sites/:id/prompt-stats', async (req, reply) => {
+    const id = Number(req.params.id);
+    const site = db.prepare('SELECT id, name FROM sites WHERE id = ?').get(id);
+    if (!site) return reply.code(404).type('text/html').send('Сайт не найден');
+    const arts = db.prepare("SELECT id, keyword, category FROM articles WHERE site_id = ? AND keyword IS NOT NULL AND TRIM(keyword) <> ''").all(id);
+    const stat = {};
+    for (const s of db.prepare('SELECT st.article_id aid, st.total_views tv, st.seo_views sv, st.percentile pct FROM article_stats st JOIN (SELECT article_id, MAX(id) mid FROM article_stats GROUP BY article_id) x ON x.mid = st.id').all()) stat[s.aid] = s;
+    const rank = {};
+    for (const r of db.prepare('SELECT r.article_id aid, r.country c, r.position p FROM article_ranks r JOIN (SELECT article_id, country, MAX(id) mid FROM article_ranks GROUP BY article_id, country) x ON x.mid = r.id').all()) (rank[r.aid] ||= {})[r.c] = r.p;
+
+    const groups = new Map(); // keyword prompt → агрегат
+    for (const a of arts) {
+      const prompt = a.category || '—';
+      const key = a.keyword + ' ' + prompt;
+      let g = groups.get(key);
+      if (!g) { g = { keyword: a.keyword, prompt, arts: 0, tv: 0, sv: 0, pctSum: 0, pctN: 0, best: { at: null, de: null, ch: null } }; groups.set(key, g); }
+      g.arts += 1;
+      const s = stat[a.id];
+      if (s) { g.tv += s.tv || 0; g.sv += s.sv || 0; if (s.pct != null) { g.pctSum += s.pct; g.pctN += 1; } }
+      const rk = rank[a.id];
+      if (rk) for (const c of ['at', 'de', 'ch']) { const p = rk[c]; if (p != null) g.best[c] = g.best[c] == null ? p : Math.min(g.best[c], p); }
+    }
+    const byKw = new Map();
+    for (const g of groups.values()) { if (!byKw.has(g.keyword)) byKw.set(g.keyword, []); byKw.get(g.keyword).push(g); }
+
+    const posCell = (p) => (p == null ? '<span class="text-secondary">—</span>' : p <= 10 ? `<span class="text-success fw-bold">#${p}</span>` : p <= 30 ? `<span class="text-warning">#${p}</span>` : `#${p}`);
+    const kws = [...byKw.keys()].sort((a, b) => a.localeCompare(b, 'de'));
+    let rows = '';
+    for (const kw of kws) {
+      const gs = byKw.get(kw).sort((a, b) => b.sv - a.sv || (a.best.at ?? 999) - (b.best.at ?? 999));
+      const best = gs.length > 1 && (gs[0].sv > 0 || gs[0].best.at != null) ? gs[0].prompt : null;
+      gs.forEach((g, i) => {
+        const avgPct = g.pctN ? Math.round(g.pctSum / g.pctN) : null;
+        const isBest = g.prompt === best;
+        rows += `<tr${isBest ? ' class="table-success"' : ''}>${i === 0 ? `<td rowspan="${gs.length}" class="align-top fw-bold">${esc(kw)}</td>` : ''}<td>${esc(g.prompt)}${isBest ? ' <span class="badge bg-green text-white">лучший</span>' : ''}</td><td>${g.arts}</td><td>${g.tv || '—'}</td><td class="fw-bold">${g.sv || '—'}</td><td>${avgPct != null ? avgPct : '—'}</td><td>${posCell(g.best.at)}</td><td>${posCell(g.best.de)}</td><td>${posCell(g.best.ch)}</td></tr>`;
+      });
+    }
+    const table = rows
+      ? `<div class="table-responsive"><table class="table table-vcenter card-table"><thead><tr><th>ключ</th><th>промт</th><th>статей</th><th>просмотры</th><th>органика</th><th>перц.</th><th>AT</th><th>DE</th><th>CH</th></tr></thead><tbody>${rows}</tbody></table></div>`
+      : '<div class="card-body text-secondary">Пока нет статей с ключом и статистикой. Сгенерируй под ключ, опубликуй и собери статистику/позиции.</div>';
+    const note = '<div class="text-secondary small mb-2">Сравнение промтов на одном ключе: «органика» — просмотры из поиска (суммарно по статьям), «AT/DE/CH» — лучшая позиция в Google. Лучший по органике промт в группе подсвечен.</div>';
+    const content = `<div class="mb-2"><a href="/sites/${id}?tab=generate#prompts" class="btn btn-link btn-sm">&larr; ${esc(site.name)}</a></div>${note}<div class="card">${table}</div>`;
+    reply.type('text/html').send(page('/sites', `Промты по ключам — ${site.name}`, content, { flash: flash(req.query) }));
   });
 
   // Живое превью блока ссылок для редактора промта (BBCode → HTML тем же рендером, что на сайте).
