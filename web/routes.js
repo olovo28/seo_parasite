@@ -1683,8 +1683,25 @@ if('${j.status}'==='running'){poll();}
       `<div class="text-secondary small">Сводка: ${summaryTxt}. Регистрация идёт строго последовательно (один поток); живой лог каждой — в <a href="/jobs">Задачах</a>. Проверка одобрения — по IMAP, без Dolphin.</div>`,
     );
 
+    // Очередь прогрева: аккаунты, которые «гуляют» по сайту перед регистрацией (по завершении — авто-регистрация).
+    const regWarm = db
+      .prepare(`SELECT r.id, e.email, r.warm_visits, r.warm_target, r.next_warm_at, s.name site_name FROM site_registrations r JOIN email_accounts e ON e.id = r.email_account_id JOIN sites s ON s.id = r.site_id WHERE r.status = 'warming' ORDER BY r.next_warm_at, r.id LIMIT 200`)
+      .all();
+    const warmRows = regWarm
+      .map((r) => `<tr><td>${r.id}</td><td>${esc(r.site_name)}</td><td>${esc(r.email)}</td><td>${r.warm_visits || 0}/${r.warm_target || '?'}</td><td class="text-secondary" style="white-space:nowrap">${r.next_warm_at ? esc(fmtInTz(r.next_warm_at, 'UTC')) + ' UTC' : '—'}</td><td class="text-secondary">${r.next_warm_at ? relFromNow(r.next_warm_at) : ''}</td></tr>`)
+      .join('');
+    const warmCard = regWarm.length
+      ? tableCard(
+          `<i class="ti ti-flame"></i> Прогрев аккаунтов (${regWarm.length})`,
+          ['id', 'сайт', 'почта', 'визитов', 'следующий визит', 'через'],
+          warmRows,
+          'warmq',
+          '<div class="text-secondary small">Человеческие визиты на сайт по расписанию (нерегулярно); по достижении цели — авто-регистрация.</div>',
+        )
+      : '';
+
     const refresh = '<script>setTimeout(function(){location.reload();},15000);</script>';
-    reply.type('text/html').send(page('/scheduler', 'Планировщик', statusCard + pubCard + delCard + regCard + actCard + refresh));
+    reply.type('text/html').send(page('/scheduler', 'Планировщик', statusCard + pubCard + delCard + warmCard + regCard + actCard + refresh));
   });
 
   // ============================ Макеты управления статьями (черновик дизайна) ============================
