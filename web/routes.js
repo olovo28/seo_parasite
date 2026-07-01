@@ -204,6 +204,7 @@ function renderArticlesWorkspace(db, { fixedSiteId = null, from = '/articles' } 
     ['cfgUnsched', '↩ Снять с расписания', 'btn-outline-secondary', 'вернуть в черновики, убрать время'],
     ['cfgAutodel', '<i class="ti ti-clock-hour-4"></i> Автоудаление', 'btn-outline-warning', 'когда снять с сайта автоматически'],
     ['cfgSiteDel', '<i class="ti ti-trash"></i> Удалить с сайта', 'btn-outline-warning', 'снять опубликованные с сайта сейчас'],
+    ['cfgArchive', '<i class="ti ti-archive"></i> В архив', 'btn-outline-secondary', 'пометить снятыми с сайта БЕЗ Dolphin (для забаненных аккаунтов / снятых вручную)'],
     ['cfgDrop', '<i class="ti ti-trash-x"></i> Удалить из БД', 'btn-outline-danger', 'удалить из базы (не трогая сайт)'],
   ];
   // Чекбоксы аккаунтов публикации (для раскладки/назначения): включённые аккаунты задействованных сайтов,
@@ -235,6 +236,7 @@ function renderArticlesWorkspace(db, { fixedSiteId = null, from = '/articles' } 
 <div id="cfgUnsched" class="cfg d-none border rounded p-2 mt-2"><div class="small text-secondary mb-2">↩ Уберёт выбранные из расписания, вернёт в черновики (на сайт не влияет).</div><button type="submit" class="btn btn-sm btn-outline-secondary bulk-action" formaction="/articles/unschedule">Снять с расписания (${seln})</button> ${cancel}</div>
 <div id="cfgAutodel" class="cfg d-none border rounded p-2 mt-2"><div class="small text-secondary mb-2"><i class="ti ti-clock-hour-4"></i> Когда снять выбранные <b>опубликованные</b> с сайта (исполнит планировщик). Те же режимы, что в настройках сайта.</div><div class="row g-2 align-items-end"><div class="col-auto"><label class="form-label small mb-1">Режим</label><select name="ad_mode" class="form-select form-select-sm" style="width:auto"><option value="none">не удалять</option><option value="window_end">к закрытию окна (${esc(endTime)})</option><option value="ttl">через N ч после публикации (до конца смены)</option><option value="exact" selected>точное время…</option></select></div><div class="col-auto adbulk-ttl d-none"><label class="form-label small mb-1">N часов</label><input type="number" name="ad_hours" class="form-control form-control-sm" value="${delHours}" min="1" style="width:5rem"></div><div class="col-auto adbulk-exact"><label class="form-label small mb-1">Время (${esc(tzLabel)})</label><div class="d-flex gap-1"><input type="date" name="ad_date" class="form-control form-control-sm" value="${delDefault.date}" style="width:8.5rem"><input type="time" name="ad_time" class="form-control form-control-sm" value="${delDefault.time}" style="width:6rem"></div></div><div class="col-auto"><button type="submit" class="btn btn-sm btn-outline-warning bulk-action" formaction="/articles/bulk-autodelete">Применить (${seln})</button>${cancel}</div></div></div>
 <div id="cfgSiteDel" class="cfg d-none border rounded p-2 mt-2"><div class="small text-secondary mb-2"><i class="ti ti-trash"></i> Снимет выбранные <b>опубликованные</b> статьи с сайта прямо сейчас (Dolphin, последовательно).</div><button type="submit" class="btn btn-sm btn-outline-warning bulk-action" formaction="/articles/bulk-site-delete" onclick="return confirm('Снять выбранные опубликованные с сайта?')">Удалить с сайта (${seln})</button> ${cancel}</div>
+<div id="cfgArchive" class="cfg d-none border rounded p-2 mt-2"><div class="small text-secondary mb-2"><i class="ti ti-archive"></i> Пометит выбранные <b>опубликованные</b> как снятые с сайта <b>без Dolphin</b> (для забаненных аккаунтов / снятых вручную на сайте) — уйдут в «архив», авто-удаление/проверка позиций снимутся.</div><button type="submit" class="btn btn-sm btn-outline-secondary bulk-action" formaction="/articles/bulk-archive" onclick="return confirm('Перенести выбранные в архив (без захода на сайт)?')">В архив (${seln})</button> ${cancel}</div>
 <div id="cfgDrop" class="cfg d-none border rounded p-2 mt-2"><div class="small text-secondary mb-2"><i class="ti ti-trash-x"></i> Удалит выбранные из базы. Опубликованные пропускаются (сначала сними с сайта).</div><button type="submit" class="btn btn-sm btn-outline-danger bulk-action" formaction="/articles/bulk-delete" onclick="return confirm('Удалить выбранные из БД?')">Удалить из БД (${seln})</button> ${cancel}</div>
 </div></form></div>`;
 
@@ -255,6 +257,8 @@ function renderArticlesWorkspace(db, { fixedSiteId = null, from = '/articles' } 
     return `<form method="post" action="/articles/${a.id}/set-delete-at" class="d-flex gap-1"><input type="hidden" name="from" value="${esc(from)}"><input type="date" name="date" class="form-control form-control-sm" style="width:8.5rem" value="${z.date}"><input type="time" name="time" class="form-control form-control-sm" style="width:6rem" value="${z.time}"><button class="btn btn-sm btn-outline-warning" title="Сохранить время авто-удаления"><i class="ti ti-check"></i></button></form>`;
   };
   const siteDelBtn = (a) => `<form method="post" action="/articles/${a.id}/site-delete" onsubmit="return confirm('Снять статью с сайта через Dolphin?')"><button class="btn btn-sm btn-outline-warning">Удалить с сайта</button></form>`;
+  // «В архив» — пометить снятой с сайта БЕЗ Dolphin (аккаунт забанен/недоступен, или сняли вручную на сайте).
+  const archiveBtn = (a) => `<form method="post" action="/articles/${a.id}/archive" onsubmit="return confirm('В архив? Пометить снятой с сайта без захода на сайт (для забаненных аккаунтов / снятых вручную).')"><button class="btn btn-sm btn-outline-secondary" title="Пометить архивной без Dolphin"><i class="ti ti-archive"></i> В архив</button></form>`;
   const rel = (s) => {
     const ep = parseStamp(s);
     if (ep == null) return '';
@@ -310,6 +314,7 @@ function renderArticlesWorkspace(db, { fixedSiteId = null, from = '/articles' } 
       const f = [];
       if (a.status !== 'published') f.push(pubCell(a));
       if (a.status === 'published' && !a.site_deleted_at) f.push(siteDelBtn(a));
+      if (a.status === 'published' && !a.site_deleted_at) f.push(archiveBtn(a));
       if (a.status === 'published' && a.site_url && !a.site_deleted_at) f.push(linkBtn(a));
       if (a.status === 'scheduled') f.push(unschedBtn(a));
       if (a.status === 'published' && a.delete_at && !a.site_deleted_at) f.push(clearDelBtn(a));
@@ -1442,6 +1447,31 @@ ${card(`Ссылки (${links.length})`, tbl(['s2', 'бренд', 'final_url'], 
       deleted = db.prepare(`DELETE FROM articles WHERE (status != 'published' OR site_deleted_at IS NOT NULL) AND id IN (${ph})`).run(...ids).changes;
     }
     reply.redirect(backTo(req.body.from, `Удалено: ${deleted}${skipped ? `, пропущено опубликованных: ${skipped}` : ''}`));
+  });
+
+  // «В архив» БЕЗ Dolphin: пометить снятой с сайта (site_deleted_at) — для забаненных аккаунтов / снятых вручную на сайте.
+  function archiveArticles(ids) {
+    if (!ids.length) return 0;
+    const now = utcStamp();
+    const upd = db.prepare("UPDATE articles SET site_deleted_at = ?, delete_at = NULL, rank_check_at = NULL WHERE id = ? AND status = 'published' AND site_deleted_at IS NULL");
+    let n = 0;
+    db.transaction(() => {
+      for (const id of ids) {
+        if (upd.run(now, id).changes) {
+          logArticleEvent(db, id, 'site_deleted', 'Перенесена в архив вручную (без Dolphin)');
+          n += 1;
+        }
+      }
+    })();
+    return n;
+  }
+  app.post('/articles/:id/archive', async (req, reply) => {
+    const n = archiveArticles([Number(req.params.id)]);
+    reply.redirect(backTo(req.body.from, n ? 'Перенесена в архив' : 'Нельзя (не опубликована или уже в архиве)'));
+  });
+  app.post('/articles/bulk-archive', async (req, reply) => {
+    const n = archiveArticles(bulkIds(req.body));
+    reply.redirect(backTo(req.body.from, `В архив перенесено: ${n}`));
   });
 
   // Балк: поставить время авто-удаления (del_date/del_time в часовом поясе панели) для выбранных опубликованных.
