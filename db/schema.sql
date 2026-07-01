@@ -39,13 +39,26 @@ CREATE TABLE IF NOT EXISTS prompts (
   site_id     INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
   name          TEXT,                               -- имя промта (тип статьи)
   content       TEXT    NOT NULL,
-  link_block    TEXT,                               -- авторский блок ссылок (BBCode)
-  link_position TEXT,                               -- куда вставлять блок: start|1|2|3|end (по умолч. 1)
+  link_block    TEXT,                               -- LEGACY: инлайн-блок ссылок (мигрирует в link_blocks)
+  link_block_id INTEGER,                            -- выбранный блок ссылок (link_blocks.id); подставляется при публикации
+  link_position TEXT,                               -- LEGACY позиция инлайн-блока
   stop_words    TEXT,                               -- стоп-слова (запятая/строки): если попали в статью — перегенерация
   tags          TEXT,                               -- теги через запятую (для article[tag_name_list])
   active        INTEGER NOT NULL DEFAULT 1,
   hidden        INTEGER NOT NULL DEFAULT 0,          -- скрыт из списков (мягкое удаление; статьи по нему не ломаются)
   created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Блоки ссылок как отдельная сущность (создать/изменить/отключить). Промт ссылается на блок (prompts.link_block_id);
+-- блок подставляется в тело статьи ПРИ ПУБЛИКАЦИИ (актуальный на момент публикации, а не вшитый при генерации).
+CREATE TABLE IF NOT EXISTS link_blocks (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  site_id       INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  name          TEXT,
+  block         TEXT,                               -- BBCode блока ссылок
+  link_position TEXT,                               -- куда вставлять: start|1|2|3|end (можно несколько через запятую)
+  enabled       INTEGER NOT NULL DEFAULT 1,          -- 0 = отключён: при публикации ссылки не вставляются
+  created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS articles (
@@ -64,6 +77,8 @@ CREATE TABLE IF NOT EXISTS articles (
   delete_at      TEXT,                                  -- когда АВТО-удалить с сайта (планировщик); local wall-clock
   no_auto_delete INTEGER NOT NULL DEFAULT 0,            -- 1 = «не удалять»: не применять auto_delete сайта при публикации
   keyword        TEXT,                                  -- целевой SEO-ключ (если статья сгенерирована под ключ из базы) — для реестра + джойна с Binom
+  link_block_id  INTEGER,                               -- какой блок ссылок подставить при публикации (link_blocks.id)
+  links_pending  INTEGER NOT NULL DEFAULT 0,             -- 1 = блок подставляется при публикации; 0 = легаси (вшит при генерации)
   rank_check_at  TEXT,                                  -- когда планировщику проверить позицию в Google (UTC; обычно +5 мин от публикации); NULL = не нужно
   site_deleted_at TEXT,                                 -- когда статья удалена С САЙТА (через Dolphin)
   generated_at   TEXT    NOT NULL DEFAULT (datetime('now')),

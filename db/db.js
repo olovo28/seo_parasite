@@ -74,6 +74,26 @@ function migrate(db) {
   ensureColumn(db, 'batches', 'max_tokens', 'INTEGER'); // с каким max_tokens отправлен батч (для разбора при сборе)
   ensureColumn(db, 'proxies', 'group_id', 'INTEGER'); // именованная группа прокси (назначение по видам работы)
   ensureColumn(db, 'jobs', 'result', 'TEXT'); // JSON-итог балк-задачи: что успело выполниться (для отчёта после остановки)
+  // Блоки ссылок отдельной сущностью: таблица + связи + перенос инлайн-блоков промтов (идемпотентно).
+  ensureColumn(db, 'prompts', 'link_block_id', 'INTEGER'); // выбранный блок ссылок (link_blocks.id)
+  ensureColumn(db, 'articles', 'link_block_id', 'INTEGER'); // какой блок подставить при публикации
+  ensureColumn(db, 'articles', 'links_pending', 'INTEGER NOT NULL DEFAULT 0'); // 1 = блок вставляется при публикации; 0 = легаси (вшит)
+  db.exec(`CREATE TABLE IF NOT EXISTS link_blocks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+    name TEXT, block TEXT, link_position TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+  {
+    const rows = db.prepare("SELECT id, site_id, name, link_block, link_position FROM prompts WHERE link_block_id IS NULL AND link_block IS NOT NULL AND TRIM(link_block) <> ''").all();
+    const ins = db.prepare('INSERT INTO link_blocks (site_id, name, block, link_position, enabled) VALUES (?, ?, ?, ?, 1)');
+    const upd = db.prepare('UPDATE prompts SET link_block_id = ? WHERE id = ?');
+    for (const p of rows) {
+      const bid = ins.run(p.site_id, `Блок: ${p.name || 'промт ' + p.id}`, p.link_block, p.link_position || '1').lastInsertRowid;
+      upd.run(bid, p.id);
+    }
+  }
   // Легаси-прокси раскладываем по СТРАНАМ в авто-группы «Импорт <C>» (все назначения/сайты) — сохраняем гео-разделение
   // исходных списков; поведение выдачи не меняется, пока пользователь не перенастроит. Также расщепляем старую
   // единую группу «Без назначения (импорт)», если осталась от прежней миграции. Идемпотентно.

@@ -512,17 +512,28 @@ ${acc.cookies_updated_at ? `<form method="post" action="/site-accounts/${acc.id}
     const showHidden = req.query.showHidden === '1';
     const visiblePrompts = db.prepare('SELECT * FROM prompts WHERE site_id = ? AND hidden = 0 ORDER BY id').all(id);
     const hiddenPrompts = showHidden ? db.prepare('SELECT * FROM prompts WHERE site_id = ? AND hidden = 1 ORDER BY id').all(id) : [];
+    const siteBlocks = db.prepare('SELECT * FROM link_blocks WHERE site_id = ? ORDER BY id').all(id);
+    const blocksById = Object.fromEntries(siteBlocks.map((b) => [b.id, b]));
     const promptRow = (p, hidden) => {
-      const v = validateBlock(p.link_block || '');
+      const b = p.link_block_id ? blocksById[p.link_block_id] : null;
       const tagsN = String(p.tags || '').split(',').map((t) => t.trim()).filter(Boolean).length;
       return `<tr${hidden ? ' class="opacity-50"' : ''}><td>${p.id}</td><td>${promptName(p)} ${p.active ? '<span class="badge bg-green text-white">активный</span>' : ''}${hidden ? ' <span class="badge bg-secondary text-white">скрыт</span>' : ''}</td>
-<td>${(p.link_block || '').trim() ? `${v.urls.length} ссыл. ${v.ok ? '<i class="ti ti-circle-check text-green"></i>' : '<span class="badge bg-red text-white">ошибки формата</span>'}` : '<span class="text-secondary">нет блока</span>'}</td>
+<td>${b ? `${esc(b.name || 'Блок ' + b.id)}${b.enabled ? '' : ' <span class="badge bg-secondary text-white">выкл</span>'}` : '<span class="text-secondary">нет блока</span>'}</td>
 <td>${tagsN >= 2 ? tagsN + ' тегов' : `<span class="badge bg-red text-white">${tagsN} тег.</span>`}</td>
 <td><div class="d-flex gap-1"><a href="/prompts/${p.id}" class="btn btn-sm btn-outline-secondary">ред.</a>${hidden ? `<form method="post" action="/prompts/${p.id}/unhide"><button class="btn btn-sm btn-outline-success">вернуть</button></form>` : `<form method="post" action="/prompts/${p.id}/delete" onsubmit="return confirm('Скрыть промт из списка? (статьи по нему не пострадают)')"><button class="btn btn-sm btn-outline-danger">скрыть</button></form>`}</div></td></tr>`;
     };
     const promptRows = visiblePrompts.map((p) => promptRow(p, false)).join('') + hiddenPrompts.map((p) => promptRow(p, true)).join('');
     const promptsFooter = `<div class="d-flex flex-wrap gap-2 align-items-center"><form method="post" action="/prompts"><input type="hidden" name="site" value="${id}"><button type="submit" class="btn btn-primary">+ Новый промт</button></form><a href="/sites/${id}?tab=generate&showHidden=${showHidden ? '0' : '1'}#prompts" class="btn btn-link btn-sm">${showHidden ? 'скрыть архивные' : 'показать скрытые'}</a><a href="/sites/${id}/prompt-stats" class="btn btn-link btn-sm"><i class="ti ti-chart-bar"></i> Сравнение промтов по ключам</a></div>`;
     const promptsCard = tableCard('<i class="ti ti-edit"></i> Промты', ['id', 'название', 'блок ссылок', 'теги', ''], promptRows, 'prompts', promptsFooter);
+    // --- блоки ссылок (отдельная сущность: создать/изменить/отключить; промт ссылается на блок) ---
+    const lbRows = siteBlocks
+      .map((b) => {
+        const v = validateBlock(b.block || '');
+        return `<tr><td>${b.id}</td><td>${esc(b.name || 'Блок ' + b.id)}</td><td>${(b.block || '').trim() ? `${v.urls.length} ссыл. ${v.ok ? '<i class="ti ti-circle-check text-green"></i>' : '<span class="badge bg-red text-white">ошибки формата</span>'}` : '<span class="text-secondary">пусто</span>'}</td><td>${b.enabled ? '<span class="badge bg-green text-white">вкл</span>' : '<span class="badge bg-secondary text-white">выкл</span>'}</td><td><div class="d-flex gap-1"><a class="btn btn-sm btn-outline-secondary" href="/link-blocks/${b.id}">изменить</a><form method="post" action="/link-blocks/${b.id}/toggle"><button class="btn btn-sm btn-outline-secondary">${b.enabled ? 'выкл' : 'вкл'}</button></form><form method="post" action="/link-blocks/${b.id}/delete" onsubmit="return confirm('Удалить блок? Промты, ссылавшиеся на него, останутся без блока.')"><button class="btn btn-sm btn-outline-danger">×</button></form></div></td></tr>`;
+      })
+      .join('');
+    const lbFooter = `<form method="post" action="/link-blocks"><input type="hidden" name="site" value="${id}"><button type="submit" class="btn btn-primary">+ Новый блок ссылок</button></form>`;
+    const linkBlocksCard = tableCard('<i class="ti ti-link"></i> Блоки ссылок <span class="text-secondary fw-normal small">(подставляются при публикации)</span>', ['id', 'название', 'ссылки', 'статус', ''], lbRows, 'linkblocks', lbFooter);
 
     // --- статьи сайта (полная рабочая область: распределение + публикация построчно/балком) ---
     const articlesWs = renderArticlesWorkspace(db, { fixedSiteId: id, from: `/sites/${id}?tab=articles` });
@@ -599,7 +610,7 @@ ${acc.cookies_updated_at ? `<form method="post" action="/site-accounts/${acc.id}
 <li class="nav-item"><button class="nav-link" type="button" data-tab="articles"><i class="ti ti-news"></i> Статьи</button></li>
 <li class="nav-item"><button class="nav-link" type="button" data-tab="settings"><i class="ti ti-settings"></i> Настройки</button></li></ul>`;
     // «Генерация по списку ключей» влита в единую панель genCard (режим «Список ключей»).
-    const paneGenerate = `<div id="tab-generate" class="d-none">${genCard}${promptsCard}${batchesCard}</div>`;
+    const paneGenerate = `<div id="tab-generate" class="d-none">${genCard}${promptsCard}${linkBlocksCard}${batchesCard}</div>`;
     const paneArticles = `<div id="tab-articles" class="d-none">${articlesWs}</div>`;
     const paneSettings = `<div id="tab-settings" class="d-none">${settings}${accountsCard}${registrationCard}</div>`;
     const tabScript = `<script>(function(){var DEF='generate',KEY='siteTab:${id}';var btns=document.querySelectorAll('[data-tab]');var panes={generate:document.getElementById('tab-generate'),articles:document.getElementById('tab-articles'),settings:document.getElementById('tab-settings')};function show(name){if(!panes[name])name=DEF;for(var k in panes){panes[k].classList.toggle('d-none',k!==name);}btns.forEach(function(b){b.classList.toggle('active',b.getAttribute('data-tab')===name);});try{localStorage.setItem(KEY,name);}catch(e){}}btns.forEach(function(b){b.addEventListener('click',function(){show(b.getAttribute('data-tab'));});});var qtab=new URLSearchParams(location.search).get('tab');var h=location.hash&&document.querySelector(location.hash);var stored;try{stored=localStorage.getItem(KEY);}catch(e){}var initial=qtab&&panes[qtab]?qtab:(h?(Object.keys(panes).find(function(k){return panes[k]===h||panes[k].contains(h);})||DEF):(stored&&panes[stored]?stored:DEF));show(initial);if(h&&initial!=='generate'){setTimeout(function(){try{h.scrollIntoView();}catch(e){}},50);}})();</script>`;
@@ -762,6 +773,8 @@ ${acc.cookies_updated_at ? `<form method="post" action="/site-accounts/${acc.id}
     const p = db.prepare('SELECT * FROM prompts WHERE id = ?').get(req.params.id);
     if (!p) return reply.code(404).send('нет');
     const navLeft = `<a href="/sites/${p.site_id}?tab=generate" class="text-decoration-none">← Сайт</a>`;
+    const blocks = db.prepare('SELECT id, name, enabled FROM link_blocks WHERE site_id = ? ORDER BY id').all(p.site_id);
+    const blockOpts = `<option value="">— без блока —</option>` + blocks.map((b) => `<option value="${b.id}"${p.link_block_id === b.id ? ' selected' : ''}>${esc(b.name || 'Блок ' + b.id)}${b.enabled ? '' : ' (выкл)'}</option>`).join('');
     const POS = [['start', 'В начале'], ['1', 'После 1-го заголовка'], ['2', 'После 2-го'], ['3', 'После 3-го'], ['4', 'После 4-го'], ['end', 'В конце']];
     const curPos = String(p.link_position || '1').split(',').map((s) => s.trim()).filter(Boolean);
     const posChecks = POS.map(([val, l]) => `<label class="form-check form-check-inline m-0"><input class="form-check-input lppos" type="checkbox" name="link_position" value="${val}"${curPos.includes(val) ? ' checked' : ''}><span class="form-check-label">${l}</span></label>`).join('');
@@ -773,15 +786,9 @@ ${acc.cookies_updated_at ? `<form method="post" action="/site-accounts/${acc.id}
 <div class="mb-2"><label class="form-label">Текст промта (то, что уходит в Claude)</label>
 <textarea name="content" class="form-control" rows="7" placeholder="Напиши статью на немецком про ...">${esc(p.content || '')}</textarea>
 <div class="form-text">Для генерации по списку вставь <code>{{KEYWORD}}</code> там, где должен быть целевой ключ (напр. «…о теме <code>{{KEYWORD}}</code>…»). При генерации он заменится на ключ; без плейсхолдера ключ допишется инструкцией в конец.</div></div>
-<div class="row g-2 mb-3"><div class="col-md-5"><label class="form-label">Теги (через запятую, ≥2)</label><input name="tags" class="form-control" value="${esc(p.tags || '')}" placeholder="Information, Informationsabend"></div><div class="col-md-7"><label class="form-label">Позиции блока ссылок <span class="text-secondary fw-normal small">(1–4, можно несколько — блок продублируется)</span></label><div class="d-flex flex-wrap gap-2 pt-1">${posChecks}</div></div></div>
+<div class="row g-2 mb-3"><div class="col-md-6"><label class="form-label">Теги (через запятую, ≥2)</label><input name="tags" class="form-control" value="${esc(p.tags || '')}" placeholder="Information, Informationsabend"></div>
+<div class="col-md-6"><label class="form-label">Блок ссылок <span class="text-secondary fw-normal small">(подставится при публикации)</span></label><div class="d-flex gap-2"><select name="link_block_id" class="form-select">${blockOpts}</select><a href="/sites/${p.site_id}?tab=generate#linkblocks" class="btn btn-outline-secondary text-nowrap">Управлять</a></div></div></div>
 <div class="mb-3"><label class="form-label">Стоп-слова <span class="text-secondary fw-normal small">(через запятую или строками — если попадут в статью, будет авто-перегенерация)</span></label><textarea name="stop_words" class="form-control" rows="2" placeholder="Casino, Wetten, spielen">${esc(p.stop_words || '')}</textarea></div>
-<div class="d-flex align-items-center flex-wrap gap-2 mb-1"><label class="form-label mb-0">Блок ссылок (BBCode)</label><span id="lbstatus" class="badge bg-secondary" title="">—</span><button type="button" id="lbhelpbtn" class="btn btn-sm btn-outline-secondary" title="Как форматировать блок">?</button></div>
-<div id="lbhelp" class="d-none alert alert-info small">${helpHtml}</div>
-<div class="mb-1 small text-secondary d-flex flex-wrap align-items-center gap-1"><span class="me-1">Вставить:</span><span id="tpltags"></span><span id="tplsnip"></span><span id="emo"></span></div>
-<div class="row g-2 mb-3">
-<div class="col-md-6"><textarea id="lb" name="link_block" rows="14" class="form-control mono" placeholder="[list]&#10;[*][b][u][urlnt=https://...]BRAND[/urlnt][/u][/b] - оффер 💣[/*]&#10;[/list]">${esc(p.link_block || '')}</textarea></div>
-<div class="col-md-6"><div class="text-secondary small mb-1">Превью (как отрисует сайт)</div><div id="lbprev" class="border rounded p-3" style="overflow:auto;max-height:22rem"></div></div>
-</div>
 <div class="d-flex flex-wrap gap-2"><button type="submit" class="btn btn-primary">Сохранить</button>
 <button type="submit" class="btn btn-outline-secondary" formaction="/prompts/${p.id}/activate">${p.active ? 'активный <i class="ti ti-check"></i>' : 'сделать активным'}</button>
 <button type="submit" class="btn btn-outline-danger" formaction="/prompts/${p.id}/delete" onclick="return confirm('Скрыть промт из списка? (статьи по нему не пострадают)')">Скрыть из списка</button></div></form>`;
@@ -861,13 +868,10 @@ var lppos=document.querySelectorAll('.lppos');function lpcap(e){var n=0;lppos.fo
 
   app.post('/prompts/:id', async (req, reply) => {
     const b = req.body;
-    // Позиции блока: чекбоксы → массив (или одиночное значение) → нормализуем в строку «start,2,4» (до 4).
-    const posList = (Array.isArray(b.link_position) ? b.link_position : b.link_position ? [b.link_position] : [])
-      .map((s) => String(s).trim())
-      .filter(Boolean);
-    const lp = posList.length ? posList.slice(0, 4).join(',') : '1';
-    db.prepare('UPDATE prompts SET name=@name, content=@content, link_block=@lb, tags=@tags, link_position=@lp, stop_words=@sw WHERE id=@id')
-      .run({ id: Number(req.params.id), name: b.name || null, content: b.content || '', lb: b.link_block || null, tags: b.tags || null, lp, sw: b.stop_words || null });
+    // Блок ссылок теперь отдельная сущность — промт хранит только ссылку на блок (link_block_id).
+    const lbId = b.link_block_id ? Number(b.link_block_id) : null;
+    db.prepare('UPDATE prompts SET name=@name, content=@content, tags=@tags, stop_words=@sw, link_block_id=@lbid WHERE id=@id')
+      .run({ id: Number(req.params.id), name: b.name || null, content: b.content || '', tags: b.tags || null, sw: b.stop_words || null, lbid: lbId });
     reply.redirect(`/prompts/${req.params.id}?msg=${encodeURIComponent('Сохранено')}`);
   });
   app.post('/prompts/:id/activate', async (req, reply) => {
@@ -880,6 +884,50 @@ var lppos=document.querySelectorAll('.lppos');function lpcap(e){var n=0;lppos.fo
     }
     reply.redirect(`/prompts/${req.params.id}?msg=${encodeURIComponent('Сделан активным')}`);
   });
+
+  // ===== Блоки ссылок (отдельная сущность): создать/редактировать/включить-выключить/удалить =====
+  app.post('/link-blocks', async (req, reply) => {
+    const siteId = Number(req.body.site);
+    const info = db.prepare("INSERT INTO link_blocks (site_id, name, block, link_position, enabled) VALUES (?, 'Новый блок', '', '1', 1)").run(siteId);
+    reply.redirect(`/link-blocks/${info.lastInsertRowid}`);
+  });
+  app.get('/link-blocks/:id', async (req, reply) => {
+    const bl = db.prepare('SELECT * FROM link_blocks WHERE id = ?').get(req.params.id);
+    if (!bl) return reply.code(404).send('нет');
+    const navLeft = `<a href="/sites/${bl.site_id}?tab=generate#linkblocks" class="text-decoration-none">← Сайт</a>`;
+    const POS = [['start', 'В начале'], ['1', 'После 1-го заголовка'], ['2', 'После 2-го'], ['3', 'После 3-го'], ['4', 'После 4-го'], ['end', 'В конце']];
+    const cur = String(bl.link_position || '1').split(',').map((s) => s.trim()).filter(Boolean);
+    const posChecks = POS.map(([v, l]) => `<label class="form-check form-check-inline m-0"><input class="form-check-input" type="checkbox" name="link_position" value="${v}"${cur.includes(v) ? ' checked' : ''}><span class="form-check-label">${l}</span></label>`).join('');
+    const formBody = `<form method="post" action="/link-blocks/${bl.id}">
+<div class="mb-2"><label class="form-label">Название</label><input name="name" class="form-control" value="${esc(bl.name || '')}" placeholder="напр. Casino AT — основной"></div>
+<div class="mb-2"><label class="form-check"><input type="checkbox" name="enabled" value="1" class="form-check-input"${bl.enabled ? ' checked' : ''}> <span class="form-check-label">Включён <span class="text-secondary small">(выключен → при публикации ссылки не вставляются)</span></span></label></div>
+<div class="mb-2"><label class="form-label">Позиции блока <span class="text-secondary fw-normal small">(по заголовкам; можно несколько — блок продублируется)</span></label><div class="d-flex flex-wrap gap-2 pt-1">${posChecks}</div></div>
+<div class="row g-2 mb-3"><div class="col-md-6"><label class="form-label">Блок (BBCode)</label><textarea id="lb" name="block" rows="14" class="form-control mono" placeholder="[list]&#10;[*][b][u][urlnt=https://...]BRAND[/urlnt][/u][/b] - оффер 💣[/*]&#10;[/list]">${esc(bl.block || '')}</textarea><div class="form-text">Binom <code>s1</code>/<code>s2</code> добавляются автоматически. Маркер <code>{{LINKS}}</code> в тексте статьи необязателен.</div></div>
+<div class="col-md-6"><div class="text-secondary small mb-1">Превью (как отрисует сайт)</div><div id="lbprev" class="border rounded p-3" style="overflow:auto;max-height:22rem"></div></div></div>
+<div class="d-flex gap-2"><button type="submit" class="btn btn-primary">Сохранить</button><button type="submit" class="btn btn-outline-danger" formaction="/link-blocks/${bl.id}/delete" onclick="return confirm('Удалить блок? Промты, ссылавшиеся на него, останутся без блока.')">Удалить</button></div></form>`;
+    const script = `<script>(function(){var ta=document.getElementById('lb'),prev=document.getElementById('lbprev');if(!ta)return;var t;function pv(){clearTimeout(t);t=setTimeout(function(){fetch('/prompts/preview',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({bbcode:ta.value})}).then(function(r){return r.json();}).then(function(d){prev.innerHTML=(d.html&&d.html.trim())?d.html:'<span class="text-secondary">—</span>';}).catch(function(){});},400);}ta.addEventListener('input',pv);pv();})();</script>`;
+    reply.type('text/html').send(layout('/sites', card('Блок ссылок', formBody) + script, { title: bl.name || `Блок ${bl.id}`, navLeft, flash: flash(req.query) }));
+  });
+  app.post('/link-blocks/:id', async (req, reply) => {
+    const b = req.body;
+    const posList = (Array.isArray(b.link_position) ? b.link_position : b.link_position ? [b.link_position] : []).map((s) => String(s).trim()).filter(Boolean);
+    const lp = posList.length ? posList.slice(0, 4).join(',') : '1';
+    db.prepare('UPDATE link_blocks SET name=@name, block=@block, link_position=@lp, enabled=@en WHERE id=@id')
+      .run({ id: Number(req.params.id), name: b.name || null, block: b.block || '', lp, en: b.enabled ? 1 : 0 });
+    reply.redirect(`/link-blocks/${req.params.id}?msg=${encodeURIComponent('Сохранено')}`);
+  });
+  app.post('/link-blocks/:id/toggle', async (req, reply) => {
+    const r = db.prepare('SELECT site_id, enabled FROM link_blocks WHERE id = ?').get(req.params.id);
+    if (r) db.prepare('UPDATE link_blocks SET enabled = ? WHERE id = ?').run(r.enabled ? 0 : 1, req.params.id);
+    reply.redirect(`/sites/${r?.site_id || ''}?tab=generate#linkblocks`);
+  });
+  app.post('/link-blocks/:id/delete', async (req, reply) => {
+    const r = db.prepare('SELECT site_id FROM link_blocks WHERE id = ?').get(req.params.id);
+    db.prepare('UPDATE prompts SET link_block_id = NULL WHERE link_block_id = ?').run(req.params.id); // отвязать промты
+    db.prepare('DELETE FROM link_blocks WHERE id = ?').run(req.params.id);
+    reply.redirect(`/sites/${r?.site_id || ''}?tab=generate#linkblocks`);
+  });
+
   // «Удаление» промта = скрытие (мягкое): убираем из списков, но статьи по нему (category) не ломаются.
   app.post('/prompts/:id/delete', async (req, reply) => {
     const r = db.prepare('SELECT site_id FROM prompts WHERE id = ?').get(req.params.id);
