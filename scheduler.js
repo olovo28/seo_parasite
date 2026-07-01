@@ -25,7 +25,8 @@ const RANK_ONE_TIMEOUT_MS = Number(process.env.RANK_ONE_TIMEOUT_MS || 300000); /
 const BULK_CONCURRENCY = Number(process.env.BULK_CONCURRENCY || 5); // авто-удаление: профилей параллельно (пул по аккаунтам)
 const BULK_DELETE_DELAY_MS = Number(process.env.BULK_DELETE_DELAY_MS || 10000); // пауза между удалениями внутри аккаунта
 const WARM_TIMEOUT_MS = Number(process.env.WARM_TIMEOUT_MS || 900000); // визит прогрева (browse 5–20 стр. с паузами) — до 15 мин
-const WARM_MAX_PER_TICK = Number(process.env.WARM_MAX_PER_TICK || 2); // сколько прогревов за тик (тяжёлые — Dolphin)
+const WARM_MAX_PER_TICK = Number(process.env.WARM_MAX_PER_TICK || 2); // сколько прогревов за проход (тяжёлые — Dolphin)
+const WARM_TICK_MS = Number(process.env.WARM_TICK_MS || 60000); // интервал дорожки прогрева (отдельно от публикации)
 
 const TICK_MS = Number(process.env.SCHEDULER_TICK_MS || 30000);
 const HEAVY_TICK_MS = Number(process.env.HEAVY_TICK_MS || 300000); // как часто проверять «пора ли» суточные джобы (сами гейтятся по дате)
@@ -119,9 +120,8 @@ async function tick() {
     const dueRank = dueRankStmt.all(now);
     const dueDel = dueDeleteStmt.all(now);
     const dueReg = dueApprovalChecks(db, now);
-    const dueWarm = dueWarmings(db, now);
-    if (due.length === 0 && dueRank.length === 0 && dueDel.length === 0 && dueReg.length === 0 && dueWarm.length === 0) return;
-    setSetting(db, 'scheduler_last_summary', `тик ${now}: к публикации ${due.length}, проверок позиции ${dueRank.length}, к удалению ${dueDel.length}, проверок одобрения ${dueReg.length}, визитов прогрева ${dueWarm.length}`);
+    if (due.length === 0 && dueRank.length === 0 && dueDel.length === 0 && dueReg.length === 0) return;
+    setSetting(db, 'scheduler_last_summary', `тик ${now}: к публикации ${due.length}, проверок позиции ${dueRank.length}, к удалению ${dueDel.length}, проверок одобрения ${dueReg.length}`);
 
     if (due.length) console.log(`[${now}] к публикации: ${due.length}`);
     for (const { id } of due) {
@@ -174,8 +174,22 @@ async function tick() {
       }
     }
 
-    // Прогрев аккаунтов: визит на сайт (browse) для созревших; по завершении прогрева — регистрация.
-    if (dueWarm.length) console.log(`[${now}] визитов прогрева: ${dueWarm.length} (до ${WARM_MAX_PER_TICK} за тик)`);
+  } finally {
+    running = false;
+  }
+}
+
+// Отдельная дорожка ПРОГРЕВА (свой флаг) — визиты браузером/Dolphin и пост-регистрация ДОЛГИЕ (минуты, капча),
+// поэтому НЕ должны блокировать публикацию/удаление в основном тике. Публикация — приоритет.
+let warmRunning = false;
+async function warmingTick() {
+  if (warmRunning || running) return; // не пересекаемся сами с собой и не грузим Dolphin одновременно с публикацией
+  warmRunning = true;
+  try {
+    const now = utcStamp();
+    const dueWarm = dueWarmings(db, now);
+    if (!dueWarm.length) return;
+    console.log(`[${now}] визитов прогрева: ${dueWarm.length} (до ${WARM_MAX_PER_TICK} за проход)`);
     for (const { id } of dueWarm.slice(0, WARM_MAX_PER_TICK)) {
       try {
         const res = await withTimeout(warmVisit(db, { registrationId: id }), WARM_TIMEOUT_MS, 'визит прогрева');
@@ -194,8 +208,10 @@ async function tick() {
         db.prepare("UPDATE site_registrations SET next_warm_at = datetime('now','+3 hours'), error = ? WHERE id = ? AND status = 'warming'").run(e.message, id);
       }
     }
+  } catch (e) {
+    console.error('Ошибка warming-тика:', e.message);
   } finally {
-    running = false;
+    warmRunning = false;
   }
 }
 
@@ -230,3 +246,8 @@ setInterval(() => {
 // Тяжёлая дорожка — независимый интервал (суточные джобы не блокируют публикации/удаления).
 heavyTick();
 setInterval(heavyTick, HEAVY_TICK_MS);
+// Дорожка прогрева — независимый интервал (визиты/регистрация НЕ блокируют публикацию). Приоритет у публикации:
+// warmingTick пропускает проход, если основной тик занят (running).
+setInterval(() => {
+  warmingTick().catch((e) => console.error('Ошибка warming-тика:', e.message));
+}, WARM_TICK_MS);
