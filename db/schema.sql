@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS articles (
   keyword        TEXT,                                  -- целевой SEO-ключ (если статья сгенерирована под ключ из базы) — для реестра + джойна с Binom
   link_block_id  INTEGER,                               -- какой блок ссылок подставить при публикации (link_blocks.id)
   links_pending  INTEGER NOT NULL DEFAULT 0,             -- 1 = блок подставляется при публикации; 0 = легаси (вшит при генерации)
+  publish_attempts INTEGER NOT NULL DEFAULT 0,           -- сколько раз пытались опубликовать (авто-ретрай при сбое)
   rank_check_at  TEXT,                                  -- когда планировщику проверить позицию в Google (UTC; обычно +5 мин от публикации); NULL = не нужно
   site_deleted_at TEXT,                                 -- когда статья удалена С САЙТА (через Dolphin)
   generated_at   TEXT    NOT NULL DEFAULT (datetime('now')),

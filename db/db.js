@@ -90,6 +90,7 @@ function migrate(db) {
   ensureColumn(db, 'prompts', 'link_block_id', 'INTEGER'); // выбранный блок ссылок (link_blocks.id)
   ensureColumn(db, 'articles', 'link_block_id', 'INTEGER'); // какой блок подставить при публикации
   ensureColumn(db, 'articles', 'links_pending', 'INTEGER NOT NULL DEFAULT 0'); // 1 = блок вставляется при публикации; 0 = легаси (вшит)
+  ensureColumn(db, 'articles', 'publish_attempts', 'INTEGER NOT NULL DEFAULT 0'); // сколько раз пытались опубликовать (авто-ретрай при сбое)
   db.exec(`CREATE TABLE IF NOT EXISTS link_blocks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,

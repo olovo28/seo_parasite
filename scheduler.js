@@ -27,6 +27,14 @@ const BULK_DELETE_DELAY_MS = Number(process.env.BULK_DELETE_DELAY_MS || 10000); 
 const WARM_TIMEOUT_MS = Number(process.env.WARM_TIMEOUT_MS || 900000); // визит прогрева (browse 5–20 стр. с паузами) — до 15 мин
 const WARM_MAX_PER_TICK = Number(process.env.WARM_MAX_PER_TICK || 2); // сколько прогревов за проход (тяжёлые — Dolphin)
 const WARM_TICK_MS = Number(process.env.WARM_TICK_MS || 60000); // интервал дорожки прогрева (отдельно от публикации)
+// Каждая дорожка — свой независимый интервал (ничто не блокирует публикацию). Профили Dolphin ограничены семафором (6).
+const PUB_TICK_MS = Number(process.env.PUB_TICK_MS || 15000); // публикация — приоритет, часто
+const RANK_TICK_MS = Number(process.env.RANK_TICK_MS || 60000); // проверка позиций (тяжёлая, капчи)
+const DEL_TICK_MS = Number(process.env.DEL_TICK_MS || 60000); // авто-удаление
+const APPR_TICK_MS = Number(process.env.APPR_TICK_MS || 120000); // проверки одобрения (IMAP)
+const HEARTBEAT_MS = Number(process.env.HEARTBEAT_MS || 15000); // независимый heartbeat (истинный liveness)
+const MAX_PUBLISH_ATTEMPTS = Number(process.env.MAX_PUBLISH_ATTEMPTS || 3); // авто-ретрай публикации
+const PUBLISH_RETRY_BACKOFF_MIN = Number(process.env.PUBLISH_RETRY_BACKOFF_MIN || 5); // пауза перед повтором, мин
 
 const TICK_MS = Number(process.env.SCHEDULER_TICK_MS || 30000);
 const HEAVY_TICK_MS = Number(process.env.HEAVY_TICK_MS || 300000); // как часто проверять «пора ли» суточные джобы (сами гейтятся по дате)
@@ -107,39 +115,62 @@ const dueDeleteStmt = db.prepare(`
   ORDER BY a.delete_at, a.id
 `);
 
-let running = false;
+// Авто-ретрай публикации: attempts+1; пока < MAX — оставить scheduled и отложить на backoff (dueStmt подхватит), иначе failed.
+const retryPublish = db.prepare(`
+  UPDATE articles SET
+    publish_attempts = publish_attempts + 1,
+    status       = CASE WHEN publish_attempts + 1 < @max THEN 'scheduled' ELSE 'failed' END,
+    scheduled_at = CASE WHEN publish_attempts + 1 < @max THEN datetime('now', '+' || @backoff || ' minutes') ELSE scheduled_at END,
+    error        = @err
+  WHERE id = @id AND status = 'scheduled'
+`);
 
-async function tick() {
-  if (running) return; // не наслаиваем тики (публикация/удаление может идти >тика)
-  running = true;
+// Дорожки НЕЗАВИСИМЫ: у каждой свой флаг и свой интервал. Все запуски Dolphin идут через общий семафор (лимит 6),
+// поэтому параллельные дорожки не перегружают браузер, а БД (better-sqlite3) синхронна → гонок нет.
+// Публикация ИЗОЛИРОВАНА и приоритетна — её больше ничто не блокирует (ни ранг-капчи, ни удаление, ни прогрев).
+
+// --- Публикация созревших scheduled (в основном HTTP; на сбой — авто-ретрай, кроме таймаута) ---
+let pubRunning = false;
+async function publishTick() {
+  if (pubRunning) return;
+  pubRunning = true;
   try {
     const now = utcStamp();
-    setSetting(db, 'scheduler_last_tick', now); // heartbeat: пишем КАЖДЫЙ тик (страница «Планировщик» это читает)
-    // Суточные сбор статистики/позиций вынесены в отдельную дорожку (heavyTick) — чтобы не блокировать публикации/удаления.
     const due = dueStmt.all(now);
-    const dueRank = dueRankStmt.all(now);
-    const dueDel = dueDeleteStmt.all(now);
-    const dueReg = dueApprovalChecks(db, now);
-    if (due.length === 0 && dueRank.length === 0 && dueDel.length === 0 && dueReg.length === 0) return;
-    setSetting(db, 'scheduler_last_summary', `тик ${now}: к публикации ${due.length}, проверок позиции ${dueRank.length}, к удалению ${dueDel.length}, проверок одобрения ${dueReg.length}`);
-
-    if (due.length) console.log(`[${now}] к публикации: ${due.length}`);
+    if (!due.length) return;
+    console.log(`[${now}] к публикации: ${due.length}`);
+    setSetting(db, 'scheduler_last_summary', `${now}: публикую ${due.length}`);
     for (const { id } of due) {
       try {
         const res = await withTimeout(publishArticleById(db, id), PUBLISH_TIMEOUT_MS, 'публикация');
         console.log(res.ok ? `  ✓ pub id=${id}: ${res.message}` : `  ✗ pub id=${id}: ${res.message}`);
       } catch (e) {
         console.error(`  ✗ pub id=${id}: ${e.message}`);
-        // Помечаем failed ТОЛЬКО если статья всё ещё 'scheduled' (фоновая публикация могла её завершить и проставить
-        // 'published' — тогда не трогаем). На таймаут добавляем явную пометку: возможно, реально опубликована.
-        const timeout = /таймаут/i.test(e.message);
-        const errMsg = timeout ? `${e.message} — возможно, статья опубликована на сайте; проверьте вручную (автоповтор отключён)` : e.message;
-        db.prepare("UPDATE articles SET status = 'failed', error = ? WHERE id = ? AND status = 'scheduled'").run(errMsg, id);
+        if (/таймаут/i.test(e.message)) {
+          // Таймаут неоднозначен (могла реально опубликоваться на сайте) — НЕ ретраим, помечаем failed с пометкой.
+          db.prepare("UPDATE articles SET status = 'failed', error = ? WHERE id = ? AND status = 'scheduled'")
+            .run(`${e.message} — возможно, статья опубликована на сайте; проверьте вручную (автоповтор отключён)`, id);
+        } else {
+          // Прочие сбои — авто-ретрай: attempts+1; <MAX → отложить на backoff (dueStmt подхватит), иначе failed.
+          retryPublish.run({ id, err: e.message, max: MAX_PUBLISH_ATTEMPTS, backoff: String(PUBLISH_RETRY_BACKOFF_MIN) });
+        }
       }
     }
+  } finally {
+    pubRunning = false;
+  }
+}
 
-    // Проверка позиции в Google через ~5 мин после публикации (по rank_check_at). Делаем один раз: чистим метку.
-    if (dueRank.length) console.log(`[${now}] проверок позиции (после публикации): ${dueRank.length}`);
+// --- Проверка позиции в Google после публикации (rank_check_at). Тяжёлая (капчи) — своя дорожка. ---
+let rankRunning = false;
+async function rankTick() {
+  if (rankRunning) return;
+  rankRunning = true;
+  try {
+    const now = utcStamp();
+    const dueRank = dueRankStmt.all(now);
+    if (!dueRank.length) return;
+    console.log(`[${now}] проверок позиции: ${dueRank.length}`);
     for (const { id } of dueRank) {
       try {
         const r = await withTimeout(checkArticleRank(db, id), RANK_ONE_TIMEOUT_MS, 'проверка позиции');
@@ -150,32 +181,53 @@ async function tick() {
         clearRankCheck.run(id); // один раз: больше не дёргаем (финальную позицию снимем перед удалением)
       }
     }
+  } finally {
+    rankRunning = false;
+  }
+}
 
-    if (dueDel.length) {
-      console.log(`[${now}] к удалению с сайта: ${dueDel.length} (пул по аккаунтам, до ${BULK_CONCURRENCY} профилей)`);
-      try {
-        // clearDeleteAtOnFail=true: при ошибке снимаем delete_at, чтобы не дёргать каждый тик (как раньше).
-        const r = await deleteArticlesGrouped(db, dueDel.map((x) => x.id), { concurrency: BULK_CONCURRENCY, delayMs: BULK_DELETE_DELAY_MS, clearDeleteAtOnFail: true });
-        console.log(`  удаление: снято ${r.ok}, ошибок ${r.fail} из ${r.total}`);
-      } catch (e) {
-        console.error(`  ✗ удаление (пул): ${e.message}`);
-      }
+// --- Авто-удаление с сайта. Своя дорожка (пул по аккаунтам). ---
+let delRunning = false;
+async function deleteTick() {
+  if (delRunning) return;
+  delRunning = true;
+  try {
+    const now = utcStamp();
+    const dueDel = dueDeleteStmt.all(now);
+    if (!dueDel.length) return;
+    console.log(`[${now}] к удалению с сайта: ${dueDel.length} (пул по аккаунтам, до ${BULK_CONCURRENCY} профилей)`);
+    try {
+      const r = await deleteArticlesGrouped(db, dueDel.map((x) => x.id), { concurrency: BULK_CONCURRENCY, delayMs: BULK_DELETE_DELAY_MS, clearDeleteAtOnFail: true });
+      console.log(`  удаление: снято ${r.ok}, ошибок ${r.fail} из ${r.total}`);
+    } catch (e) {
+      console.error(`  ✗ удаление (пул): ${e.message}`);
     }
+  } finally {
+    delRunning = false;
+  }
+}
 
-    if (dueReg.length) console.log(`[${now}] проверок одобрения регистраций: ${dueReg.length}`);
+// --- Проверки одобрения регистраций (IMAP). Своя дорожка. ---
+let apprRunning = false;
+async function approvalTick() {
+  if (apprRunning) return;
+  apprRunning = true;
+  try {
+    const now = utcStamp();
+    const dueReg = dueApprovalChecks(db, now);
+    if (!dueReg.length) return;
+    console.log(`[${now}] проверок одобрения регистраций: ${dueReg.length}`);
     for (const { id } of dueReg) {
       try {
         const res = await withTimeout(checkApproval(db, { registrationId: id }), PUBLISH_TIMEOUT_MS, 'проверка одобрения');
         console.log(`  ${res.ok ? '✓' : '·'} reg id=${id}: ${res.message}`);
       } catch (e) {
         console.error(`  ✗ reg id=${id}: ${e.message}`);
-        // не зацикливаем тик: откладываем следующую проверку на 6 ч (4 раза в день)
         db.prepare("UPDATE site_registrations SET next_check_at = datetime('now','+6 hours'), error = ? WHERE id = ? AND status = 'awaiting_admin'").run(e.message, id);
       }
     }
-
   } finally {
-    running = false;
+    apprRunning = false;
   }
 }
 
@@ -183,7 +235,7 @@ async function tick() {
 // поэтому НЕ должны блокировать публикацию/удаление в основном тике. Публикация — приоритет.
 let warmRunning = false;
 async function warmingTick() {
-  if (warmRunning || running) return; // не пересекаемся сами с собой и не грузим Dolphin одновременно с публикацией
+  if (warmRunning) return; // не пересекаемся сами с собой; Dolphin-нагрузку общий семафор (6) балансирует
   warmRunning = true;
   try {
     const now = utcStamp();
@@ -236,18 +288,29 @@ async function heavyTick() {
 process.on('unhandledRejection', (e) => console.error('unhandledRejection:', e?.message || e));
 process.on('uncaughtException', (e) => console.error('uncaughtException:', e?.message || e));
 
-console.log(`Планировщик запущен. Тик каждые ${TICK_MS / 1000}с. Ctrl+C для остановки.`);
+console.log(`Планировщик запущен (дорожки: публикация ${PUB_TICK_MS / 1000}с / позиции / удаление / одобрение / прогрев + heartbeat ${HEARTBEAT_MS / 1000}с). Ctrl+C для остановки.`);
 // Подчистить осиротевшие одноразовые профили Dolphin (best-effort, не блокируем старт).
 sweepOrphanProfiles().catch((e) => console.error('Sweep профилей:', e.message));
-await tick();
-setInterval(() => {
-  tick().catch((e) => console.error('Ошибка тика:', e.message));
-}, TICK_MS);
-// Тяжёлая дорожка — независимый интервал (суточные джобы не блокируют публикации/удаления).
+
+// Независимый heartbeat — пишем liveness ВСЕГДА (event loop свободен на await даже во время долгой капчи).
+// Бейдж «не отвечает» теперь = процесс мёртв/заблокирован, а не «занят долгой операцией».
+const heartbeat = () => {
+  try {
+    setSetting(db, 'scheduler_last_tick', utcStamp());
+  } catch (e) {
+    console.error('heartbeat:', e.message);
+  }
+};
+heartbeat();
+setInterval(heartbeat, HEARTBEAT_MS);
+
+// Каждая дорожка — свой независимый интервал (ничто не блокирует публикацию; профили ограничены семафором).
+const runTrack = (fn, name) => fn().catch((e) => console.error(`Ошибка дорожки «${name}»:`, e.message));
+runTrack(publishTick, 'публикация');
+setInterval(() => runTrack(publishTick, 'публикация'), PUB_TICK_MS);
+setInterval(() => runTrack(rankTick, 'позиции'), RANK_TICK_MS);
+setInterval(() => runTrack(deleteTick, 'удаление'), DEL_TICK_MS);
+setInterval(() => runTrack(approvalTick, 'одобрение'), APPR_TICK_MS);
+setInterval(() => runTrack(warmingTick, 'прогрев'), WARM_TICK_MS);
 heavyTick();
 setInterval(heavyTick, HEAVY_TICK_MS);
-// Дорожка прогрева — независимый интервал (визиты/регистрация НЕ блокируют публикацию). Приоритет у публикации:
-// warmingTick пропускает проход, если основной тик занят (running).
-setInterval(() => {
-  warmingTick().catch((e) => console.error('Ошибка warming-тика:', e.message));
-}, WARM_TICK_MS);
