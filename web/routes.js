@@ -26,7 +26,7 @@ import { listEmailAccounts, freeEmailAccounts, addEmailAccount, importEmailAccou
 import { importProxies, listGroups, getGroup, createGroup, updateGroup, deleteGroup, setProxiesGroup, assignProxy, PROXY_PURPOSES } from '../lib/proxyPool.js';
 import { listRegistrations, createRegistration, getRegistration, getRegistrationByEmail, updateRegistration } from '../lib/registrations.js';
 import { registerOnSite, checkApproval, MAX_APPROVAL_CHECKS } from '../lib/registrar.js';
-import { startWarming } from '../lib/warming.js';
+import { startWarming, warmVisit } from '../lib/warming.js';
 import { generateIdentity } from '../lib/identity.js';
 import { getRegEvents, recentRegEvents, logRegEvent } from '../lib/regEvents.js';
 import { FARM_FIELDS, getFarmConfig } from '../lib/farmConfig.js';
@@ -63,7 +63,7 @@ const tbl = (head, rows) =>
 const tableCard = (title, head, rows, id, footer) =>
   `<div class="card mb-3"${id ? ` id="${id}"` : ''}><div class="card-header"><h3 class="card-title">${title}</h3></div><div class="table-responsive"><table class="table table-vcenter card-table"><thead><tr>${head.map((h) => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows || `<tr><td colspan="${head.length}" class="text-secondary">нет</td></tr>`}</tbody></table></div>${footer ? `<div class="card-footer">${footer}</div>` : ''}</div>`;
 const promptName = (p) => esc(p.name || `Промт ${p.id}`);
-const jobTypeRu = (t) => (t === 'generate' ? 'генерация' : t === 'publish' ? 'публикация' : t === 'register' ? 'регистрация' : t === 'stats' ? 'статистика' : t === 'rank' ? 'позиции' : t === 'mailbox' ? 'регистрация почт' : esc(t));
+const jobTypeRu = (t) => (t === 'generate' ? 'генерация' : t === 'publish' ? 'публикация' : t === 'register' ? 'регистрация' : t === 'stats' ? 'статистика' : t === 'rank' ? 'позиции' : t === 'mailbox' ? 'регистрация почт' : t === 'warm' ? 'прогрев' : esc(t));
 // Ячейка позиции в выдаче: «#3» (зелёная топ-10 / жёлтая 11-30 / серая дальше) или «—». data-v для сортировки.
 const rankCell = (r) => {
   if (!r || r.position == null) return `<td data-v="999" class="text-secondary">${r && r.error ? '<span title="' + esc(r.error) + '">ошибка</span>' : '—'}</td>`;
@@ -2593,6 +2593,50 @@ ${e.site_id ? `<form method="post" action="/email-accounts/${e.id}/release" titl
     return jobId;
   }
 
+  // Немедленный визит прогрева (кнопка «прогреть сейчас») — фоновой задачей с живым логом; по завершении цели — регистрация.
+  function enqueueWarmVisit(registrationId) {
+    const reg0 = db.prepare('SELECT site_id FROM site_registrations WHERE id = ?').get(registrationId);
+    const jobId = createJob('warm', { siteId: reg0?.site_id });
+    // отодвигаем плановый визит, чтобы планировщик не запустил этот же прогрев параллельно
+    db.prepare("UPDATE site_registrations SET next_warm_at = datetime('now','+2 hours') WHERE id = ? AND status = 'warming'").run(registrationId);
+    regQueueLen += 1;
+    logJob(jobId, `В очереди на визит прогрева (поток один; впереди: ${regQueueLen - 1}).`);
+    regQueueChain = regQueueChain.then(async () => {
+      try {
+        logJob(jobId, 'Старт визита прогрева…');
+        const res = await withTimeout(warmVisit(db, { registrationId, onStep: (m) => logJob(jobId, m) }), 900000, 'визит прогрева');
+        if (res.done) {
+          logJob(jobId, 'Прогрев завершён — регистрирую…');
+          const r = db.prepare('SELECT site_id, email_account_id FROM site_registrations WHERE id = ?').get(registrationId);
+          const rr = await withTimeout(registerOnSite(db, { siteId: r.site_id, emailAccountId: r.email_account_id, onStep: (m) => logJob(jobId, m) }), PUBLISH_TIMEOUT_MS, 'регистрация');
+          finishJob(jobId, { ok: rr.ok, message: rr.message });
+        } else {
+          finishJob(jobId, { ok: true, message: `Визит ${res.visits}/${res.target} выполнен.` });
+        }
+      } catch (e) {
+        finishJob(jobId, { ok: false, message: e.message });
+      } finally {
+        regQueueLen -= 1;
+      }
+    });
+    return jobId;
+  }
+
+  // «Прогреть сейчас» — следующий визит немедленно (не ждать расписания).
+  app.post('/registrations/:id/warm-now', async (req, reply) => {
+    const reg = db.prepare('SELECT id, status FROM site_registrations WHERE id = ?').get(req.params.id);
+    if (!reg) return reply.redirect('/sites/');
+    if (reg.status !== 'warming') return reply.redirect(`/registrations/${reg.id}?msg=${encodeURIComponent('Регистрация не в статусе прогрева')}`);
+    reply.redirect(`/jobs/${enqueueWarmVisit(reg.id)}`);
+  });
+  // «Регистрировать сейчас» — закончить прогрев и сразу зарегистрировать.
+  app.post('/registrations/:id/register-now', async (req, reply) => {
+    const reg = db.prepare('SELECT id, site_id, email_account_id, status FROM site_registrations WHERE id = ?').get(req.params.id);
+    if (!reg) return reply.redirect('/sites/');
+    if (!['warming', 'pending'].includes(reg.status)) return reply.redirect(`/registrations/${reg.id}?msg=${encodeURIComponent('Регистрация уже идёт или пройдена')}`);
+    reply.redirect(`/jobs/${enqueueRegistration(reg.site_id, reg.email_account_id)}`);
+  });
+
   app.post('/sites/:id/register', async (req, reply) => {
     const siteId = Number(req.params.id);
     const raw = req.body.emails;
@@ -2667,7 +2711,18 @@ ${e.site_id ? `<form method="post" action="/email-accounts/${e.id}/release" titl
 <div class="col-auto">имя: ${esc(reg.identity?.name || '—')}</div>
 ${reg.status === 'warming' ? `<div class="col-auto">визитов: <b>${reg.warm_visits || 0}/${reg.warm_target || '?'}</b> · дальше ${reg.next_warm_at ? esc(fmtInTz(reg.next_warm_at, 'UTC')) + ' UTC' : '—'}</div>` : ''}
 ${reg.status === 'awaiting_admin' ? `<div class="col-auto">проверок: <b>${reg.checks || 0}/${MAX_APPROVAL_CHECKS}</b> · следующая ${reg.next_check_at ? esc(fmtInTz(reg.next_check_at, 'UTC')) + ' UTC' : '—'}</div>` : ''}</div>`;
-    const content = `<div class="mb-2"><a href="/sites/${site.id}?tab=settings#registration" class="btn btn-link btn-sm">&larr; ${esc(site.name || 'Сайт')}</a></div>${info}<div class="card"><div class="table-responsive"><table class="table table-vcenter card-table"><thead><tr><th>время</th><th>событие</th><th>текст</th></tr></thead><tbody>${evRows}</tbody></table></div></div>`;
+    // Ускорить процесс вручную (не ждать расписания): прогреть сейчас / зарегистрировать сейчас / проверить одобрение.
+    let actions = '';
+    if (reg.status === 'warming') {
+      actions = `<form method="post" action="/registrations/${reg.id}/warm-now" class="d-inline"><button class="btn btn-outline-primary btn-sm"><i class="ti ti-flame"></i> Прогреть сейчас (следующий визит)</button></form>
+<form method="post" action="/registrations/${reg.id}/register-now" class="d-inline" onsubmit="return confirm('Закончить прогрев и зарегистрировать сейчас?')"><button class="btn btn-primary btn-sm">Регистрировать сейчас</button></form>`;
+    } else if (reg.status === 'pending') {
+      actions = `<form method="post" action="/registrations/${reg.id}/register-now" class="d-inline"><button class="btn btn-primary btn-sm">Регистрировать сейчас</button></form>`;
+    } else if (reg.status === 'awaiting_admin') {
+      actions = `<form method="post" action="/registrations/${reg.id}/check" class="d-inline" onsubmit="return confirm('Проверить одобрение по IMAP?')"><button class="btn btn-outline-secondary btn-sm">Проверить одобрение сейчас</button></form>`;
+    }
+    const actionsBar = actions ? `<div class="mb-3 d-flex gap-2 flex-wrap">${actions}</div>` : '';
+    const content = `<div class="mb-2"><a href="/sites/${site.id}?tab=settings#registration" class="btn btn-link btn-sm">&larr; ${esc(site.name || 'Сайт')}</a></div>${info}${actionsBar}<div class="card"><div class="table-responsive"><table class="table table-vcenter card-table"><thead><tr><th>время</th><th>событие</th><th>текст</th></tr></thead><tbody>${evRows}</tbody></table></div></div>`;
     reply.type('text/html').send(page('/sites', `Регистрация #${reg.id} — ${email.email || ''}`, content, { flash: flash(req.query) }));
   });
   // Массовая проверка одобрения по IMAP: одна задача, регистрации проверяются последовательно
