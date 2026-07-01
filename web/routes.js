@@ -24,7 +24,7 @@ import { adapterList, getAdapter } from '../lib/sites/index.js';
 import { EU_TZ, zonedToEpoch, epochToZoned, utcStamp, parseStamp, fmtInTz, nextDailyOccurrence } from '../lib/time.js';
 import { listEmailAccounts, freeEmailAccounts, addEmailAccount, importEmailAccounts, toggleEmailAccount, removeEmailAccount, clearEmailCookies, releaseEmail } from '../lib/emailAccounts.js';
 import { importProxies, listGroups, getGroup, createGroup, updateGroup, deleteGroup, setProxiesGroup, PROXY_PURPOSES } from '../lib/proxyPool.js';
-import { listRegistrations } from '../lib/registrations.js';
+import { listRegistrations, createRegistration, getRegistration, getRegistrationByEmail, updateRegistration } from '../lib/registrations.js';
 import { registerOnSite, checkApproval, MAX_APPROVAL_CHECKS } from '../lib/registrar.js';
 import { mailProviderList } from '../lib/mail/index.js';
 import { createMailbox } from '../lib/mailRegistrar.js';
@@ -440,7 +440,19 @@ ${acc.cookies_updated_at ? `<form method="post" action="/site-accounts/${acc.id}
 <div class="col"><label class="form-label">Прокси (host:port[:user:pass])</label><input name="proxy" class="form-control" placeholder="напр. 1.2.3.4:8080:user:pass"></div>
 <div class="col-auto"><label class="form-label">Метка</label><input name="label" class="form-control" placeholder="опц." style="max-width:9rem"></div>
 <div class="col-auto"><button type="submit" class="btn btn-primary">Добавить</button></div></form>`;
-    const accountsCard = `<div class="card mb-3" id="accounts"><div class="card-header"><h3 class="card-title"><i class="ti ti-key"></i> Аккаунты публикации</h3></div><div class="table-responsive"><table class="table table-vcenter card-table"><thead><tr><th>id</th><th>логин</th><th>пароль</th><th>прокси</th><th>метка</th><th>статус</th><th>сессия</th><th></th></tr></thead><tbody>${accRows || '<tr><td colspan="8" class="text-secondary">аккаунтов нет — добавь</td></tr>'}</tbody></table></div><div class="card-footer">${addAcc}</div></div>
+    // Ручное добавление зарегистрированного аккаунта: логин(email)+пароль почты+пароль аккаунта(пусто=пароль почты).
+    // Не одобрен → в «Регистрации» (awaiting_admin) с IMAP-проверкой одобрения; одобрен → сразу активный аккаунт.
+    const manualAccForm = `<details class="mt-2"><summary class="btn btn-outline-secondary btn-sm">Добавить вручную зарегистрированный аккаунт</summary>
+<form method="post" action="/sites/${id}/manual-account" class="row g-2 align-items-end mt-1">
+<div class="col-auto"><label class="form-label">Логин (email)</label><input name="email" class="form-control" required placeholder="name@gmx.at"></div>
+<div class="col-auto"><label class="form-label">Пароль почты</label><input name="email_password" class="form-control" required></div>
+<div class="col-auto"><label class="form-label">Пароль аккаунта <span class="text-secondary small">(пусто = пароль почты)</span></label><input name="account_password" class="form-control"></div>
+<div class="col"><label class="form-label">Прокси</label><input name="proxy" class="form-control" placeholder="host:port:user:pass"></div>
+<div class="col-auto"><label class="form-label">Метка</label><input name="label" class="form-control" style="max-width:8rem"></div>
+<div class="col-auto"><label class="form-check mt-2 mb-0"><input type="checkbox" name="approved" value="1" class="form-check-input"> <span class="form-check-label small">уже одобрен</span></label></div>
+<div class="col-auto"><button class="btn btn-primary">Добавить</button></div></form>
+<div class="form-text mt-1">Не одобрен → уйдёт в «Регистрации» как «ждём одобрения» + IMAP-проверка одобрения (нужны верный пароль почты и прокси, IMAP включён). Одобрен → сразу активный аккаунт публикации.</div></details>`;
+    const accountsCard = `<div class="card mb-3" id="accounts"><div class="card-header"><h3 class="card-title"><i class="ti ti-key"></i> Аккаунты публикации</h3></div><div class="table-responsive"><table class="table table-vcenter card-table"><thead><tr><th>id</th><th>логин</th><th>пароль</th><th>прокси</th><th>метка</th><th>статус</th><th>сессия</th><th></th></tr></thead><tbody>${accRows || '<tr><td colspan="8" class="text-secondary">аккаунтов нет — добавь</td></tr>'}</tbody></table></div><div class="card-footer">${addAcc}${manualAccForm}</div></div>
 <script>document.addEventListener('click',function(e){var el=e.target.closest('.copy-pw');if(!el)return;var pw=el.getAttribute('data-pw')||'';var done=function(){var t=el.textContent;el.textContent='скопировано';el.classList.add('text-green');setTimeout(function(){el.textContent=t;el.classList.remove('text-green');},1000);};if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(pw).then(done).catch(function(){});}else{var ta=document.createElement('textarea');ta.value=pw;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();try{document.execCommand('copy');done();}catch(_){}ta.remove();}});</script>`;
 
     // --- регистрация аккаунтов (по свободным почтам пула) ---
@@ -616,6 +628,44 @@ ${acc.cookies_updated_at ? `<form method="post" action="/site-accounts/${acc.id}
       reply.redirect(`/sites/${id}?msg=${encodeURIComponent('Аккаунт добавлен')}#accounts`);
     } catch (e) {
       reply.redirect(`/sites/${id}?msg=${encodeURIComponent('Ошибка: ' + e.message)}#accounts`);
+    }
+  });
+  // Ручное добавление зарегистрированного аккаунта (+ IMAP-проверка одобрения для «не одобрен»).
+  app.post('/sites/:id/manual-account', async (req, reply) => {
+    const id = Number(req.params.id);
+    const b = req.body;
+    const email = String(b.email || '').trim();
+    const emailPw = String(b.email_password || '');
+    const accPw = String(b.account_password || '').trim() || emailPw; // пусто → пароль аккаунта = пароль почты
+    const proxy = String(b.proxy || '').trim() || null;
+    const label = String(b.label || '').trim() || `manual:${email}`;
+    const back = (msg) => reply.redirect(`/sites/${id}?tab=settings&msg=${encodeURIComponent(msg)}#accounts`);
+    if (!email || !emailPw) return back('Нужны логин (email) и пароль почты.');
+    try {
+      if (b.approved) {
+        addSiteAccount(db, id, { username: email, password: accPw, proxy, label });
+        return back(`Аккаунт ${email} добавлен как активный (уже одобрен).`);
+      }
+      // Не одобрен → почта в пул + регистрация awaiting_admin для IMAP-проверки одобрения.
+      const dom = (email.split('@')[1] || '').toLowerCase();
+      const provider = /web\.de$/.test(dom) ? 'webde' : /mail\.com$/.test(dom) ? 'mailcom' : 'gmx';
+      let ea = db.prepare('SELECT * FROM email_accounts WHERE email = ?').get(email);
+      if (!ea) {
+        addEmailAccount(db, { provider, email, password: emailPw, proxy: proxy || undefined });
+        ea = db.prepare('SELECT * FROM email_accounts WHERE email = ?').get(email);
+      } else {
+        db.prepare('UPDATE email_accounts SET password = ?, proxy = COALESCE(?, proxy) WHERE id = ?').run(emailPw, proxy, ea.id);
+      }
+      db.prepare('UPDATE email_accounts SET site_id = ? WHERE id = ?').run(id, ea.id); // одна почта = один сайт
+      let reg = getRegistrationByEmail(db, ea.id);
+      if (!reg) {
+        const rid = createRegistration(db, { siteId: id, emailAccountId: ea.id, identity: null, siteUsername: email, sitePassword: accPw });
+        reg = getRegistration(db, rid);
+      }
+      updateRegistration(db, reg.id, { status: 'awaiting_admin', site_username: email, site_password: accPw, confirm_url: 'manual', submitted_at: utcStamp(), next_check_at: utcStamp(), checks: 0, error: null });
+      return back(`Аккаунт ${email} добавлен — ждёт одобрения, доступна проверка по IMAP («Регистрации»).`);
+    } catch (e) {
+      return back('Ошибка: ' + e.message);
     }
   });
   app.post('/site-accounts/:id/toggle', async (req, reply) => {
