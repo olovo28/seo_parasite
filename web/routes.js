@@ -2395,6 +2395,7 @@ ${dScript}`;
   });
 
   // ===== Пул почт (глобальный ресурс сети) =====
+  let lastEmailImport = null; // последний результат импорта — показываем детальной панелью на /emails (после POST-redirect)
   app.get('/emails', async (req, reply) => {
     const maskPw = (v) => (!v ? '' : v.length <= 3 ? '•••' : `${v.slice(0, 2)}•••${v.slice(-1)}`);
     const sites = db.prepare('SELECT id, name FROM sites').all();
@@ -2425,7 +2426,19 @@ ${e.site_id ? `<form method="post" action="/email-accounts/${e.id}/release" titl
     const tableHtml = `<div class="card mb-3"><div class="card-header"><h3 class="card-title"><i class="ti ti-mail"></i> Пул почт (${rows.length})</h3></div><div class="table-responsive"><table class="table table-vcenter card-table"><thead><tr><th>id</th><th>акт.</th><th>провайдер</th><th>email</th><th>пароль</th><th>прокси</th><th>статус</th><th>сайт</th><th>сессия</th><th></th></tr></thead><tbody>${tr || '<tr><td colspan="10" class="text-secondary">почт нет — добавь</td></tr>'}</tbody></table></div><div class="card-footer">${addForm}<div class="mt-2">${importForm}</div></div></div>`;
 
     const note = '<div class="text-secondary small mb-2">Почты — общий ресурс сети (одна почта = один сайт). Прокси берутся из пула по стране почты (раздел <a href="/proxies">Прокси</a>) и распределяются автоматически.</div>';
-    reply.type('text/html').send(page('/emails', 'Почты', note + tableHtml, { flash: flash(req.query) }));
+    // Детальная панель результата импорта (показываем один раз после импорта, затем очищаем).
+    let importResult = '';
+    if (lastEmailImport) {
+      const r = lastEmailImport;
+      lastEmailImport = null;
+      const errList = r.errors.length
+        ? `<details class="mt-2"><summary class="text-danger small" style="cursor:pointer">ошибки (${r.errors.length}) — показать</summary><ul class="small text-danger mb-0 mt-1">${r.errors.slice(0, 50).map((e) => `<li>${esc(e)}</li>`).join('')}${r.errors.length > 50 ? `<li>… и ещё ${r.errors.length - 50}</li>` : ''}</ul></details>`
+        : '';
+      const np = r.noProxy ? ` <span class="badge bg-orange text-white" title="пул прокси нужной страны кончился">без прокси: ${r.noProxy}</span>` : '';
+      importResult = `<div class="card mb-3 border-primary"><div class="card-body"><h3 class="card-title mb-2"><i class="ti ti-file-import"></i> Результат импорта</h3>
+<div class="d-flex flex-wrap gap-2 align-items-center"><span class="badge bg-secondary text-white">строк: ${r.total}</span><span class="badge bg-green text-white">добавлено: ${r.added}</span><span class="badge bg-azure text-white">дублей: ${r.skipped}</span><span class="badge ${r.errors.length ? 'bg-red' : 'bg-secondary'} text-white">ошибок: ${r.errors.length}</span>${np}</div>${errList}</div></div>`;
+    }
+    reply.type('text/html').send(page('/emails', 'Почты', note + importResult + tableHtml, { flash: flash(req.query) }));
   });
 
   app.post('/emails', async (req, reply) => {
@@ -2438,9 +2451,8 @@ ${e.site_id ? `<form method="post" action="/email-accounts/${e.id}/release" titl
     }
   });
   app.post('/emails/import', async (req, reply) => {
-    const r = importEmailAccounts(db, req.body.text, { provider: req.body.provider, country: req.body.country });
-    const np = r.noProxy ? `, без прокси ${r.noProxy} (пул ${esc(req.body.country || 'at')} кончился)` : '';
-    reply.redirect(`/emails?msg=${encodeURIComponent(`Импорт: добавлено ${r.added}, дублей ${r.skipped}, ошибок ${r.errors.length}${np}`)}`);
+    lastEmailImport = importEmailAccounts(db, req.body.text, { provider: req.body.provider, country: req.body.country });
+    reply.redirect('/emails#import'); // детальную сводку покажет панель «Результат импорта» на /emails
   });
   // ===== Регистрация почт: автосоздание ящиков через Dolphin (createMailbox по выбранному провайдеру) =====
   app.get('/mailboxes', async (req, reply) => {
