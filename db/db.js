@@ -74,6 +74,11 @@ function migrate(db) {
   ensureColumn(db, 'batches', 'max_tokens', 'INTEGER'); // с каким max_tokens отправлен батч (для разбора при сборе)
   ensureColumn(db, 'proxies', 'group_id', 'INTEGER'); // именованная группа прокси (назначение по видам работы)
   ensureColumn(db, 'jobs', 'result', 'TEXT'); // JSON-итог балк-задачи: что успело выполниться (для отчёта после остановки)
+  // «Прогрев» аккаунта перед регистрацией: несколько дней человеческих визитов (browse) с переиспользованием кук.
+  ensureColumn(db, 'site_registrations', 'warm_visits', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'site_registrations', 'warm_target', 'INTEGER'); // сколько визитов запланировано (дней прогрева)
+  ensureColumn(db, 'site_registrations', 'next_warm_at', 'TEXT'); // когда следующий визит прогрева (планировщик)
+  ensureColumn(db, 'site_registrations', 'warm_cookies', 'TEXT'); // сохранённая сессия сайта между визитами (returning visitor)
   // Блоки ссылок отдельной сущностью: таблица + связи + перенос инлайн-блоков промтов (идемпотентно).
   ensureColumn(db, 'prompts', 'link_block_id', 'INTEGER'); // выбранный блок ссылок (link_blocks.id)
   ensureColumn(db, 'articles', 'link_block_id', 'INTEGER'); // какой блок подставить при публикации

@@ -255,7 +255,11 @@ CREATE TABLE IF NOT EXISTS site_registrations (
   site_username    TEXT,                                -- логин аккаунта на сайте (обычно = email)
   site_password    TEXT,                                -- пароль аккаунта на сайте
   status           TEXT    NOT NULL DEFAULT 'pending',
-                     -- pending | mail_login_failed | submitted | confirm_failed | awaiting_admin | approved | rejected | failed
+                     -- warming | pending | mail_login_failed | submitted | confirm_failed | awaiting_admin | approved | rejected | failed
+  warm_visits      INTEGER NOT NULL DEFAULT 0,          -- сделано визитов прогрева
+  warm_target      INTEGER,                             -- запланировано визитов (дней прогрева)
+  next_warm_at     TEXT,                                -- когда следующий визит прогрева (UTC)
+  warm_cookies     TEXT,                                -- сессия сайта между визитами (returning visitor)
   confirm_url      TEXT,                                -- ссылка подтверждения из письма
   next_check_at    TEXT,                                -- когда планировщику проверить одобрение (UTC)
   checks           INTEGER NOT NULL DEFAULT 0,          -- сколько раз проверяли одобрение

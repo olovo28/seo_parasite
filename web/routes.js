@@ -26,6 +26,8 @@ import { listEmailAccounts, freeEmailAccounts, addEmailAccount, importEmailAccou
 import { importProxies, listGroups, getGroup, createGroup, updateGroup, deleteGroup, setProxiesGroup, PROXY_PURPOSES } from '../lib/proxyPool.js';
 import { listRegistrations, createRegistration, getRegistration, getRegistrationByEmail, updateRegistration } from '../lib/registrations.js';
 import { registerOnSite, checkApproval, MAX_APPROVAL_CHECKS } from '../lib/registrar.js';
+import { startWarming } from '../lib/warming.js';
+import { generateIdentity } from '../lib/identity.js';
 import { mailProviderList } from '../lib/mail/index.js';
 import { createMailbox } from '../lib/mailRegistrar.js';
 import { getSmsProvider } from '../lib/sms/index.js';
@@ -457,11 +459,11 @@ ${acc.cookies_updated_at ? `<form method="post" action="/site-accounts/${acc.id}
 
     // --- регистрация аккаунтов (по свободным почтам пула) ---
     const regStatusRu = {
-      pending: 'в очереди', mail_login_failed: 'вход в почту не удался', submitted: 'форма отправлена',
+      warming: 'прогрев', pending: 'в очереди', mail_login_failed: 'вход в почту не удался', submitted: 'форма отправлена',
       confirm_failed: 'нет подтверждения', awaiting_admin: 'ждём одобрения админа', approved: 'одобрено', rejected: 'отклонено', failed: 'ошибка',
     };
     const regStatusBadge = (s) => {
-      const m = { approved: 'bg-green', awaiting_admin: 'bg-azure', submitted: 'bg-azure', pending: 'bg-secondary', rejected: 'bg-red', failed: 'bg-red', mail_login_failed: 'bg-red', confirm_failed: 'bg-orange' };
+      const m = { approved: 'bg-green', awaiting_admin: 'bg-azure', submitted: 'bg-azure', warming: 'bg-cyan', pending: 'bg-secondary', rejected: 'bg-red', failed: 'bg-red', mail_login_failed: 'bg-red', confirm_failed: 'bg-orange' };
       return `<span class="badge ${m[s] || 'bg-secondary'} text-white">${esc(regStatusRu[s] || s)}</span>`;
     };
     const adapterObj = getAdapter(s.adapter);
@@ -483,7 +485,7 @@ ${acc.cookies_updated_at ? `<form method="post" action="/site-accounts/${acc.id}
 <td class="text-secondary small" style="white-space:nowrap">${esc(fmtInTz(r.submitted_at, 'UTC'))}</td>
 <td class="text-secondary small" style="white-space:nowrap">${r.approved_at ? esc(fmtInTz(r.approved_at, 'UTC')) : '—'}</td>
 <td class="text-secondary small" style="white-space:nowrap">${r.last_checked_at ? esc(fmtInTz(r.last_checked_at, 'UTC')) + (r.checks ? ` <span class="text-secondary">(${r.checks})</span>` : '') : '—'}</td>
-<td class="text-secondary small">${esc((r.error || '').slice(0, 60))}</td>
+<td class="text-secondary small">${r.status === 'warming' ? `визит ${r.warm_visits || 0}/${r.warm_target || '?'}${r.next_warm_at ? ' · дальше ' + esc(fmtInTz(r.next_warm_at, 'UTC')) : ''}` : esc((r.error || '').slice(0, 60))}</td>
 <td><div class="d-flex gap-1">${check}${reopen}${retry}</div></td></tr>`;
       })
       .join('');
@@ -501,10 +503,14 @@ ${acc.cookies_updated_at ? `<form method="post" action="/site-accounts/${acc.id}
         ? '<div class="alert alert-warning">Не настроен сервис решения капч — задай его в <a href="/settings">Настройках</a> (без него регистрация с капчей не пройдёт).</div>'
         : '';
     const regForm = supportsReg
-      ? `${regWarn}<form method="post" action="/sites/${id}/register" onsubmit="return confirm('Запустить регистрацию выбранных почт через Dolphin? Реальные действия на сайте.')">
+      ? `${regWarn}<form method="post" action="/sites/${id}/register" onsubmit="return confirm('Запустить через Dolphin? Реальные визиты/действия на сайте.')">
 <div class="mb-2 text-secondary small">Выбери свободные почты пула (каждая закрепляется за этим сайтом — правило «одна почта = один сайт»). Личность и пароль генерируются автоматически.</div>
 <div class="row"><div class="col" style="max-height:14rem;overflow:auto">${emailChecks}</div></div>
-<button type="submit" class="btn btn-primary mt-2"${freeEmails.length ? '' : ' disabled'}>Зарегистрировать выбранные</button></form>`
+<div class="d-flex flex-wrap gap-3 align-items-end mt-2">
+<button type="submit" class="btn btn-primary"${freeEmails.length ? '' : ' disabled'}>Зарегистрировать выбранные</button>
+<div class="d-flex align-items-end gap-2"><div><label class="form-label mb-0 small">дней прогрева</label><input type="number" name="warm_days" value="3" min="1" max="10" class="form-control form-control-sm" style="width:5rem"></div>
+<button type="submit" class="btn btn-outline-primary" formaction="/sites/${id}/warm-register"${freeEmails.length ? '' : ' disabled'}>Прогреть, затем зарегистрировать</button></div></div>
+<div class="form-text mt-1">«Прогрев» — несколько дней человеческих визитов (browse 5–20 стр.) с переиспользованием кук, потом авто-регистрация. Правдоподобнее для модерации.</div></form>`
       : regWarn;
     const registrationCard = `<div class="card mb-3" id="registration"><div class="card-header"><h3 class="card-title"><i class="ti ti-user-plus"></i> Регистрация аккаунтов</h3></div><div class="card-body">${regForm}</div>${regTable}${bulkCheckBar}</div>`;
 
@@ -1660,7 +1666,7 @@ if('${j.status}'==='running'){poll();}
     const actCard = tableCard('<i class="ti ti-history"></i> Недавняя активность', ['время (сайт)', 'статья', 'событие', 'текст'], actRows, 'acts');
 
     // Регистрации: сводка по статусам + очередь проверок одобрения (планировщик дергает по next_check_at).
-    const regStatusRu = { pending: 'в очереди', mail_login_failed: 'почта недоступна', submitted: 'форма отправлена', confirm_failed: 'нет подтверждения', awaiting_admin: 'ждём одобрения', approved: 'одобрено', rejected: 'отклонено', failed: 'ошибка' };
+    const regStatusRu = { warming: 'прогрев', pending: 'в очереди', mail_login_failed: 'почта недоступна', submitted: 'форма отправлена', confirm_failed: 'нет подтверждения', awaiting_admin: 'ждём одобрения', approved: 'одобрено', rejected: 'отклонено', failed: 'ошибка' };
     const regSummary = db.prepare('SELECT status, COUNT(*) c FROM site_registrations GROUP BY status').all();
     const regAwait = db
       .prepare(`SELECT r.id, e.email, r.next_check_at, r.checks, s.name site_name FROM site_registrations r JOIN email_accounts e ON e.id = r.email_account_id JOIN sites s ON s.id = r.site_id WHERE r.status = 'awaiting_admin' ORDER BY r.next_check_at, r.id LIMIT 200`)
@@ -2542,6 +2548,27 @@ ${e.site_id ? `<form method="post" action="/email-accounts/${e.id}/release" titl
     // одна почта → на страницу её задачи; несколько → на сайт (очередь видна в «Задачах»)
     if (ids.length === 1) return reply.redirect(`/jobs/${firstJob}`);
     reply.redirect(`/sites/${siteId}?tab=settings&msg=${encodeURIComponent(`В очередь на регистрацию (последовательно): ${ids.length}. Прогресс — в «Задачах».`)}#registration`);
+  });
+
+  // Прогрев перед регистрацией: создаём регистрации в статусе 'warming' (визиты пойдут по расписанию → авто-регистрация).
+  app.post('/sites/:id/warm-register', async (req, reply) => {
+    const siteId = Number(req.params.id);
+    const raw = req.body.emails;
+    const ids = (Array.isArray(raw) ? raw : raw != null ? [raw] : []).map(Number).filter(Boolean);
+    const days = Math.max(1, Math.min(10, Number(req.body.warm_days) || 3));
+    if (!ids.length) return reply.redirect(`/sites/${siteId}?tab=settings&msg=${encodeURIComponent('Не выбрана ни одна почта')}#registration`);
+    let started = 0;
+    for (const emailAccountId of ids) {
+      try {
+        const ea = db.prepare('SELECT email FROM email_accounts WHERE id = ?').get(emailAccountId);
+        if (!ea || getRegistrationByEmail(db, emailAccountId)) continue; // уже есть регистрация — пропускаем
+        const identity = generateIdentity();
+        db.prepare('UPDATE email_accounts SET site_id = ? WHERE id = ?').run(siteId, emailAccountId); // одна почта = один сайт
+        startWarming(db, { siteId, emailAccountId, identity, siteUsername: ea.email, sitePassword: identity.password, target: days });
+        started += 1;
+      } catch { /* пропускаем проблемную почту */ }
+    }
+    reply.redirect(`/sites/${siteId}?tab=settings&msg=${encodeURIComponent(`Прогрев запущен для ${started} почт (${days} дн.). Визиты пойдут по расписанию, затем авто-регистрация.`)}#registration`);
   });
   app.post('/registrations/:id/retry', async (req, reply) => {
     const regId = Number(req.params.id);
